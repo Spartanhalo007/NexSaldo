@@ -5,23 +5,30 @@ Prototipo de aplicación de escritorio para el registro de finanzas personales
 con datos de cierre de Yahoo Finance. Proyecto de tesis, Universidad Manuela
 Beltrán. Desarrollo individual, uso local.
 
-## Estado actual: Incremento 1 (2026-11-01)
+## Estado actual: Incremento 2 (2026-11-01)
 
-Implementado en este incremento:
+Implementado hasta ahora:
 
-- Estructura del proyecto con separación de responsabilidades (RNF-08):
-  configuración, acceso a datos y scripts de comprobación.
+- Estructura del proyecto con separación de responsabilidades (RNF-08).
 - Configuración de conexión a PostgreSQL mediante variables de entorno
   (`.env`), sin contraseñas en el código.
 - Esquema inicial de la base de datos: tablas `categoria` y
-  `movimiento_financiero` (preparación de CU-01 / RF-01).
-- Script de verificación manual de conexión y esquema.
+  `movimiento_financiero`.
+- Interfaz gráfica tkinter basada en el mockup de la tesis: barra lateral
+  de navegación (Resumen, Cuentas, Gastos, Ingresos, Inversiones, Reportes,
+  Categorías, Configuración, Modo Oscuro) y módulo de movimientos.
+- Gestión de ingresos y gastos (CU-01 parcial): registro con validaciones,
+  consulta y eliminación con confirmación.
+- Lógica de negocio (`GestorFinanciero`, `MovimientoFinanciero`): importes
+  con `Decimal`, valor mayor que cero, tipos INGRESO/GASTO, monedas COP/USD.
+- Pruebas automatizadas (28) de lógica y de integración con PostgreSQL.
 
-Pendiente (no incluido en este incremento):
+Pendiente:
 
-- Lógica de registro, validaciones y gestión completa de movimientos (CU-01).
-- Interfaz gráfica (tkinter).
-- Creación, modificación y eliminación de categorías desde la aplicación.
+- Modificación de movimientos ya guardados (resto de CU-01).
+- Los demás módulos de la barra lateral (Resumen, Cuentas, Inversiones,
+  Reportes, Categorías, Configuración) se informan como pendientes en la
+  propia interfaz; no presentan funciones inexistentes.
 - Activos personales, inversiones, vista consolidada, reportes y patrimonio neto.
 
 ## Requisitos
@@ -79,6 +86,33 @@ es esperable y no necesita repetir el paso.
 Resultado esperado: mensajes `[OK]` de conexión, de aplicación del esquema y la
 lista de categorías iniciales. Si algo falla, el script muestra `[ERROR]` con
 la causa y no presenta la operación como exitosa.
+
+## Ejecutar la aplicación (Incremento 2)
+
+Con el servicio de PostgreSQL iniciado y el archivo `.env` configurado:
+
+```powershell
+.venv\Scripts\python -m app.main
+```
+
+Abre la ventana principal: la barra lateral reproduce el mockup y los botones
+Gastos e Ingresos abren el módulo de movimientos (registro, consulta y
+eliminación con confirmación). El resto de módulos muestra un aviso de que
+están pendientes de implementación.
+
+## Ejecutar las pruebas automatizadas
+
+Las pruebas requieren `requirements-dev.txt` y la base de datos local en
+ejecución (usan el `.env` del proyecto; si no existe, las pruebas de
+integración se omiten y las de lógica se ejecutan igualmente):
+
+```powershell
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest pruebas
+```
+
+Resultado esperado: 28 pruebas superadas. Los datos que insertan las pruebas
+son ficticios ("dato ficticio de prueba automatizada") y se eliminan solos.
 
 ## Decisiones registradas
 

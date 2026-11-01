@@ -1,0 +1,3 @@
+# Dependencias de desarrollo y pruebas (no requeridas para ejecutar la aplicación).
+# pytest: ejecutor de las pruebas automatizadas de la carpeta pruebas/.
+pytest==9.2.0
