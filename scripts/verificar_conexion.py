@@ -32,6 +32,9 @@ def main() -> int:
         print(f"[ERROR] Falta la variable de entorno {error}.")
         print("        Copie .env.example a .env y complete los valores.")
         return 1
+    except ValueError as error:
+        print(f"[ERROR] Configuración inválida: {error}")
+        return 1
 
     repositorio = RepositorioLocal(configuracion)
 

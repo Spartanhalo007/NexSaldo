@@ -43,16 +43,24 @@ Edite `.env` y reemplace `CAMBIAR_ESTA_CONTRASENA` por la contraseña del rol
 
 ## Preparación de la base de datos (una sola vez)
 
-1. Abra `sql\preparar_base_datos.sql` y reemplace
-   `CAMBIAR_ESTA_CONTRASENA` por la contraseña que usará la aplicación.
-2. Ejecute con la cuenta de administrador de PostgreSQL:
+Ejecute con la cuenta de administrador de PostgreSQL:
 
 ```powershell
 psql -U postgres -f sql\preparar_base_datos.sql
 ```
 
-Esto crea el rol `nexsaldo_app` (sin privilegios de superusuario) y la base de
-datos `nexsaldo` de su propiedad.
+El script le pedirá por consola la contraseña del rol (no hace falta editar
+el archivo: la contraseña real nunca queda escrita en él). Esto crea:
+
+- El rol `nexsaldo_app`, sin privilegios de superusuario.
+- La base de datos `nexsaldo`, de su propiedad.
+- Retiro de los permisos de `PUBLIC` sobre esa base de datos: ninguna otra
+  cuenta local puede conectarse a ella.
+
+Use la misma contraseña en el archivo `.env` (`NEXSALDO_DB_CONTRASENA`).
+
+Nota: si ejecuta el script dos veces, verá un error porque el rol ya existe;
+es esperable y no necesita repetir el paso.
 
 ### Configuración de PostgreSQL que usted debe aplicar (fuera del código)
 

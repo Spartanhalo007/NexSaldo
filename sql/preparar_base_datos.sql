@@ -2,16 +2,24 @@
 -- Ejecutar desde PowerShell en la raíz del proyecto:
 --     psql -U postgres -f sql\preparar_base_datos.sql
 --
--- Crea:
---   1. El rol nexsaldo_app: cuenta SIN privilegios de superusuario. Solo
---      puede iniciar sesión y trabajar dentro de la base de datos nexsaldo.
---   2. La base de datos nexsaldo, propiedad de nexsaldo_app.
+-- Qué hace:
+--   1. Pide por consola la contraseña del rol de la aplicación (\prompt),
+--      de modo que la contraseña real nunca quede escrita en este archivo
+--      ni en el historial de comandos de PowerShell.
+--   2. Crea el rol nexsaldo_app: cuenta SIN privilegios de superusuario.
+--   3. Crea la base de datos nexsaldo, propiedad de nexsaldo_app.
+--   4. Retira a PUBLIC los privilegios sobre la base de datos: ninguna otra
+--      cuenta local podrá conectarse a ella (endurecimiento de RNF-03).
 --
--- IMPORTANTE:
--- - Reemplace CAMBIAR_ESTA_CONTRASENA por una contraseña propia ANTES de
---   ejecutar este archivo.
--- - No registre esa contraseña en el repositorio: la que usa la aplicación
---   se configura en el archivo .env local (ver .env.example).
+-- La contraseña que escriba aquí debe ser la misma que configure en el
+-- archivo .env local (NEXSALDO_DB_CONTRASENA).
 
-CREATE ROLE nexsaldo_app LOGIN PASSWORD 'CAMBIAR_ESTA_CONTRASENA';
+\prompt 'Escriba la contraseña para el rol nexsaldo_app: ' contrasena_aplicacion
+
+-- Aborta en el primer error y devuelve un código de fallo distinto de cero,
+-- para que un problema no pase inadvertido.
+\set ON_ERROR_STOP on
+
+CREATE ROLE nexsaldo_app LOGIN PASSWORD :'contrasena_aplicacion';
 CREATE DATABASE nexsaldo OWNER nexsaldo_app;
+REVOKE ALL ON DATABASE nexsaldo FROM PUBLIC;
