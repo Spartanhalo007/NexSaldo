@@ -2,7 +2,7 @@
 
 Presenta el formulario de registro, la tabla con los movimientos
 guardados y la eliminación con confirmación. Basada en el mockup de la
-tesis (tarjetas verdes oscuras con acentos dorados).
+tesis (tarjetas verdes oscuras, botones redondeados y acentos dorados).
 
 Reglas de la tesis aplicadas aquí:
 - Si una validación falla, se informa el error y se conservan los datos
@@ -12,45 +12,32 @@ Reglas de la tesis aplicadas aquí:
   exitosa.
 """
 
-import tkinter as tk
 from datetime import date
 from tkinter import ttk, messagebox
 
+import customtkinter as ctk
+
 from app.gestor.gestor_financiero import ErrorValidacion, totales_por_moneda
-from app.gui.estilos import COLORES
+from app.gui.estilos import COLORES, FUENTE
+from app.gui.formato import formatear_valor
 
 ETIQUETAS_TIPO = {"INGRESO": "Ingreso", "GASTO": "Gasto"}
 
 
-def formatear_valor(valor, moneda):
-    """Da formato de visualización a un importe (solo pantalla, no almacenamiento)."""
-    texto = f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    prefijo = "$" if moneda == "COP" else "US$"
-    return f"{prefijo} {texto}"
-
-
-class VistaMovimientos(tk.Frame):
+class VistaMovimientos(ctk.CTkFrame):
     """Panel de registro, consulta y eliminación de movimientos."""
 
     def __init__(self, master, gestor, filtro_tipo=None, titulo="Movimientos", **kwargs):
-        super().__init__(master, bg=COLORES["fondo_contenido"], **kwargs)
+        super().__init__(master, fg_color="transparent", **kwargs)
         self._gestor = gestor
         self._filtro_tipo = filtro_tipo
         self._ids_tabla = {}
 
-        # Encabezado del módulo.
-        encabezado = tk.Frame(self, bg=COLORES["fondo_contenido"])
-        encabezado.pack(fill="x")
-        tk.Label(encabezado, text=titulo, font=("Segoe UI", 18, "bold"),
-                 bg=COLORES["fondo_contenido"], fg=COLORES["texto"]).pack(anchor="w")
-        tk.Label(encabezado, text="Registro manual de ingresos y gastos",
-                 font=("Segoe UI", 10),
-                 bg=COLORES["fondo_contenido"],
-                 fg=COLORES["texto_secundario"]).pack(anchor="w")
+        self._construir_encabezado()
 
         # Cuerpo: formulario a la izquierda, tabla a la derecha.
-        cuerpo = tk.Frame(self, bg=COLORES["fondo_contenido"])
-        cuerpo.pack(fill="both", expand=True, pady=(10, 0))
+        cuerpo = ctk.CTkFrame(self, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, pady=(12, 0))
         cuerpo.columnconfigure(1, weight=1)
         cuerpo.rowconfigure(0, weight=1)
 
@@ -60,74 +47,104 @@ class VistaMovimientos(tk.Frame):
         self.refrescar()
 
     # ------------------------------------------------------------------
+    # Encabezado del módulo
+    # ------------------------------------------------------------------
+
+    def _construir_encabezado(self):
+        encabezado = ctk.CTkFrame(self, fg_color="transparent")
+        encabezado.pack(fill="x")
+        ctk.CTkLabel(encabezado, text=titulo, font=(FUENTE, 22, "bold"),
+                     text_color=COLORES["texto"], anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            encabezado, text="Registro manual de ingresos y gastos",
+            font=(FUENTE, 12),
+            text_color=COLORES["texto_secundario"], anchor="w").pack(fill="x")
+
+    # ------------------------------------------------------------------
     # Formulario de registro
     # ------------------------------------------------------------------
 
     def _construir_formulario(self, cuerpo):
-        tarjeta = ttk.Frame(cuerpo, style="Tarjeta.TFrame", padding=14)
+        tarjeta = ctk.CTkFrame(cuerpo, fg_color=COLORES["fondo_tarjeta"],
+                               corner_radius=14, width=320)
         tarjeta.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
 
-        ttk.Label(tarjeta, text="Registrar movimiento", style="EtiquetaFormulario.TLabel",
-                 font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2,
-                                                      sticky="w", pady=(0, 10))
+        ctk.CTkLabel(tarjeta, text="Registrar movimiento",
+                     font=(FUENTE, 14, "bold"),
+                     text_color=COLORES["texto"]).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(14, 10))
 
         def etiqueta(texto, fila):
-            ttk.Label(tarjeta, text=texto, style="EtiquetaFormulario.TLabel").grid(
-                row=fila, column=0, sticky="w", pady=4)
+            ctk.CTkLabel(tarjeta, text=texto, font=(FUENTE, 11),
+                         text_color=COLORES["texto_secundario"]).grid(
+                row=fila, column=0, sticky="w", pady=5)
 
         # Tipo de movimiento.
         etiqueta("Tipo", 1)
-        self._campo_tipo = ttk.Combobox(tarjeta, values=["Ingreso", "Gasto"],
-                                       state="readonly", width=22)
+        self._campo_tipo = ctk.CTkComboBox(tarjeta, values=["Ingreso", "Gasto"],
+                                           state="readonly", width=180,
+                                           corner_radius=8)
         self._campo_tipo.set("Gasto" if self._filtro_tipo != "INGRESO" else "Ingreso")
-        self._campo_tipo.grid(row=1, column=1, sticky="we", pady=4)
+        self._campo_tipo.grid(row=1, column=1, sticky="we", pady=5)
 
         # Fecha (formato AAAA-MM-DD; valor inicial: día actual).
         etiqueta("Fecha (AAAA-MM-DD)", 2)
-        self._campo_fecha = ttk.Entry(tarjeta, width=25)
+        self._campo_fecha = ctk.CTkEntry(tarjeta, width=180, corner_radius=8)
         self._campo_fecha.insert(0, date.today().isoformat())
-        self._campo_fecha.grid(row=2, column=1, sticky="we", pady=4)
+        self._campo_fecha.grid(row=2, column=1, sticky="we", pady=5)
 
         # Valor: número mayor que cero, sin separadores de miles.
         etiqueta("Valor (ej.: 15000 o 15000.50)", 3)
-        self._campo_valor = ttk.Entry(tarjeta, width=25)
-        self._campo_valor.grid(row=3, column=1, sticky="we", pady=4)
+        self._campo_valor = ctk.CTkEntry(tarjeta, width=180, corner_radius=8)
+        self._campo_valor.grid(row=3, column=1, sticky="we", pady=5)
 
         # Moneda.
         etiqueta("Moneda", 4)
-        self._campo_moneda = ttk.Combobox(tarjeta, values=["COP", "USD"],
-                                          state="readonly", width=22)
+        self._campo_moneda = ctk.CTkComboBox(tarjeta, values=["COP", "USD"],
+                                             state="readonly", width=180,
+                                             corner_radius=8)
         self._campo_moneda.set("COP")
-        self._campo_moneda.grid(row=4, column=1, sticky="we", pady=4)
+        self._campo_moneda.grid(row=4, column=1, sticky="we", pady=5)
 
         # Categoría (catálogo guardado en la base de datos).
         etiqueta("Categoría", 5)
-        self._campo_categoria = ttk.Combobox(tarjeta, state="readonly", width=22)
-        self._campo_categoria.grid(row=5, column=1, sticky="we", pady=4)
+        self._campo_categoria = ctk.CTkComboBox(tarjeta, state="readonly",
+                                                 width=180, corner_radius=8)
+        self._campo_categoria.grid(row=5, column=1, sticky="we", pady=5)
 
         # Descripción opcional.
         etiqueta("Descripción (opcional)", 6)
-        self._campo_descripcion = ttk.Entry(tarjeta, width=25)
-        self._campo_descripcion.grid(row=6, column=1, sticky="we", pady=4)
+        self._campo_descripcion = ctk.CTkEntry(tarjeta, width=180, corner_radius=8)
+        self._campo_descripcion.grid(row=6, column=1, sticky="we", pady=5)
 
-        # Acciones del formulario.
-        botones = ttk.Frame(tarjeta, style="Tarjeta.TFrame")
+        # Acciones del formulario (botones redondeados como en el mockup).
+        botones = ctk.CTkFrame(tarjeta, fg_color="transparent")
         botones.grid(row=7, column=0, columnspan=2, sticky="we", pady=(12, 0))
-        ttk.Button(botones, text="Guardar movimiento", style="Primario.TButton",
-                   command=self._al_guardar).pack(side="left")
-        ttk.Button(botones, text="Limpiar campos", style="Secundario.TButton",
-                   command=self._limpiar_formulario).pack(side="left", padx=8)
+        ctk.CTkButton(botones, text="Guardar movimiento",
+                      corner_radius=16, height=34,
+                      fg_color=COLORES["acento"], hover_color=COLORES["acento_hover"],
+                      text_color="#10241C", font=(FUENTE, 11, "bold"),
+                      command=self._al_guardar).pack(side="left")
+        ctk.CTkButton(botones, text="Limpiar campos",
+                      corner_radius=16, height=34,
+                      fg_color=COLORES["boton_lateral"],
+                      hover_color=COLORES["hover_lateral"],
+                      font=(FUENTE, 11),
+                      command=lambda: self._limpiar_formulario()).pack(
+            side="left", padx=8)
 
         # Mensaje de estado (éxito o error) bajo los botones.
-        self._etiqueta_estado = tk.Label(tarjeta, text="", wraplength=240, justify="left",
-                                         bg=COLORES["fondo_tarjeta"], fg=COLORES["texto"])
-        self._etiqueta_estado.grid(row=8, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self._etiqueta_estado = ctk.CTkLabel(tarjeta, text="", wraplength=260,
+                                             justify="left", font=(FUENTE, 11),
+                                             text_color=COLORES["texto"])
+        self._etiqueta_estado.grid(row=8, column=0, columnspan=2,
+                                   sticky="we", pady=(8, 12))
 
     def _cargar_categorias(self):
         """Carga el catálogo de categorías desde la base de datos."""
         try:
             categorias = self._gestor.obtener_categorias()
-            self._campo_categoria["values"] = categorias
+            self._campo_categoria.configure(values=categorias)
             if categorias:
                 self._campo_categoria.set(categorias[0])
         except Exception as error:
@@ -141,15 +158,21 @@ class VistaMovimientos(tk.Frame):
     # ------------------------------------------------------------------
 
     def _construir_tabla(self, cuerpo):
-        contenedor = ttk.Frame(cuerpo, style="Tarjeta.TFrame", padding=10)
+        contenedor = ctk.CTkFrame(cuerpo, fg_color=COLORES["fondo_tarjeta"],
+                                  corner_radius=14)
         contenedor.grid(row=0, column=1, sticky="nsew")
 
-        ttk.Label(contenedor, text="Movimientos guardados", style="EtiquetaFormulario.TLabel",
-                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(contenedor, text="Movimientos guardados",
+                     font=(FUENTE, 14, "bold"),
+                     text_color=COLORES["texto"]).pack(anchor="w", padx=14,
+                                                        pady=(12, 4))
 
         columnas = ("fecha", "tipo", "categoria", "valor", "moneda", "descripcion")
-        self._tabla = ttk.Treeview(contenedor, columns=columnas, show="headings",
-                                   selectmode="browse")
+        # Tabla: customtkinter no incluye una; se usa el Treeview de ttk
+        # con los colores del tema.
+        self._tabla = ttk.Treeview(contenedor, columns=columnas,
+                                    show="headings", selectmode="browse",
+                                    style="Tablita.Treeview")
         encabezados = {
             "fecha": ("Fecha", 90, "w"),
             "tipo": ("Tipo", 70, "w"),
@@ -163,19 +186,31 @@ class VistaMovimientos(tk.Frame):
             self._tabla.heading(columna, text=texto)
             self._tabla.column(columna, width=ancho, anchor=alineacion)
 
-        barra = ttk.Scrollbar(contenedor, orient="vertical", command=self._tabla.yview)
+        barra = ttk.Scrollbar(contenedor, orient="vertical",
+                              command=self._tabla.yview)
         self._tabla.configure(yscrollcommand=barra.set)
-        self._tabla.pack(side="left", fill="both", expand=True, pady=(6, 0))
-        barra.pack(side="right", fill="y", pady=(6, 0))
+        self._tabla.pack(side="left", fill="both", expand=True, pady=(6, 0),
+                         padx=(10, 0))
+        barra.pack(side="right", fill="y", pady=(6, 0), padx=(0, 6))
 
         # Fila de acciones y totales bajo la tabla.
-        pie = ttk.Frame(contenedor, style="Tarjeta.TFrame")
-        pie.pack(fill="x", pady=(8, 0))
-        ttk.Button(pie, text="Actualizar lista", style="Secundario.TButton",
-                   command=self.refrescar).pack(side="left")
-        ttk.Button(pie, text="Eliminar seleccionado", style="Secundario.TButton",
-                   command=self._al_eliminar).pack(side="left", padx=8)
-        self._etiqueta_totales = ttk.Label(pie, text="", style="EtiquetaFormulario.TLabel")
+        pie = ctk.CTkFrame(contenedor, fg_color="transparent")
+        pie.pack(fill="x", pady=(8, 12), padx=14)
+        ctk.CTkButton(pie, text="Actualizar lista",
+                      corner_radius=14, height=30,
+                      fg_color=COLORES["boton_lateral"],
+                      hover_color=COLORES["hover_lateral"],
+                      font=(FUENTE, 11),
+                      command=self.refrescar).pack(side="left")
+        ctk.CTkButton(pie, text="Eliminar seleccionado",
+                      corner_radius=14, height=30,
+                      fg_color=COLORES["boton_lateral"],
+                      hover_color=COLORES["hover_lateral"],
+                      font=(FUENTE, 11),
+                      command=self._al_eliminar).pack(side="left", padx=8)
+        self._etiqueta_totales = ctk.CTkLabel(pie, text="",
+                                              font=(FUENTE, 11),
+                                              text_color=COLORES["texto"])
         self._etiqueta_totales.pack(side="right")
 
     def refrescar(self):
@@ -218,11 +253,11 @@ class VistaMovimientos(tk.Frame):
         """
         totales = totales_por_moneda(movimientos)
         if not totales:
-            self._etiqueta_totales.config(text="Sin movimientos guardados.")
+            self._etiqueta_totales.configure(text="Sin movimientos guardados.")
         else:
             partes = [f"{moneda}: {formatear_valor(total, moneda)}"
                       for moneda, total in totales.items()]
-            self._etiqueta_totales.config(text="Suma · " + " · ".join(partes))
+            self._etiqueta_totales.configure(text="Suma · " + " · ".join(partes))
 
     # ------------------------------------------------------------------
     # Acciones
@@ -241,14 +276,15 @@ class VistaMovimientos(tk.Frame):
             )
         except ErrorValidacion as error:
             # Regla de la tesis: informar el error y conservar lo diligenciado.
-            self._etiqueta_estado.config(text=f"No se guardó: {error}",
-                                          fg=COLORES["error"])
+            self._etiqueta_estado.configure(
+                text=f"No se guardó: {error}", text_color=COLORES["error"])
             messagebox.showerror("Datos incompletos o inválidos", str(error))
             return
         except Exception as error:
             # Error de almacenamiento: se informa, sin presentar éxito.
-            self._etiqueta_estado.config(text="No se pudo guardar el movimiento.",
-                                          fg=COLORES["error"])
+            self._etiqueta_estado.configure(
+                text="No se pudo guardar el movimiento.",
+                text_color=COLORES["error"])
             messagebox.showerror(
                 "Error de almacenamiento",
                 "El movimiento no pudo guardarse. Verifique que PostgreSQL esté "
@@ -256,8 +292,9 @@ class VistaMovimientos(tk.Frame):
             )
             return
 
-        self._etiqueta_estado.config(text="Movimiento guardado correctamente.",
-                                     fg=COLORES["exito"])
+        self._etiqueta_estado.configure(
+            text="Movimiento guardado correctamente.",
+            text_color=COLORES["exito"])
         self._limpiar_formulario(limpiar_estado=False)
         self.refrescar()
 
@@ -303,8 +340,4 @@ class VistaMovimientos(tk.Frame):
         self._campo_valor.delete(0, "end")
         self._campo_descripcion.delete(0, "end")
         if limpiar_estado:
-            self._etiqueta_estado.config(text="")
-
-
-# Import diferido: evita dependencia circular de estilos al inicio del módulo.
-from app.gui.estilos import COLORES as COLORES  # noqa: E402
+            self._etiqueta_estado.configure(text="")

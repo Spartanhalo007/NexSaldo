@@ -1,78 +1,71 @@
-"""Estilos visuales de NexSaldo.
+"""Tema visual de NexSaldo (customtkinter).
 
-Paleta tomada del mockup de la tesis (verde bosque oscuro, verde esmeralda
-y acentos dorados, con texto blanco). La prioridad es la legibilidad: los
-campos de entrada usan fondo claro para que el texto digitado sea fácil de
-leer, aunque el resto de la ventana mantenga el tema oscuro del mockup.
+Paleta tomada del mockup de la tesis (colores muestreados de la imagen
+original): fondo esmeralda, barra lateral verde bosque, tarjetas verde
+oscuro y acentos dorados. La prioridad es la legibilidad: los campos de
+entrada usan fondo claro para que el texto digitado sea fácil de leer.
 """
 
-# Paleta de colores (basada en el mockup de la pantalla inicial).
+# Paleta de colores (muestreada del mockup de la pantalla inicial).
 COLORES = {
-    "fondo_lateral": "#14342B",     # barra lateral: verde bosque oscuro
-    "fondo_lateral_hover": "#1E4A3A",
-    "boton_lateral": "#1E4A3A",      # botones de navegación en píldora
-    "fondo_contenido": "#1F5B45",    # área principal: verde esmeralda
-    "fondo_tarjeta": "#0F291F",     # formularios y tablas: verde muy oscuro
-    "borde_tarjeta": "#2E6B54",
-    "acento": "#E9C46A",            # dorado: botones principales y encabezados
+    "fondo_lateral": "#0B3623",     # barra lateral: verde bosque oscuro
+    "fondo_contenido": "#278960",   # área principal: verde esmeralda
+    "fondo_tarjeta": "#166246",     # tarjetas: verde oscuro
+    "boton_lateral": "#103725",     # botones de navegación en píldora
+    "hover_lateral": "#0E2B1C",     # resaltado al pasar el mouse
+    "acento": "#FBB718",            # dorado: botones principales y dona
+    "acento_hover": "#E5A512",
     "texto": "#FFFFFF",
-    "texto_secundario": "#BFD8CC",
+    "texto_secundario": "#CFE8DA",
     "exito": "#7DC98F",
     "error": "#F28C8C",
     "campo_fondo": "#F4F7F5",       # entradas de texto: fondo claro (legibilidad)
     "campo_texto": "#10241C",
+    "borde_tabla": "#2E6B54",
 }
 
+# Colores de los segmentos de la dona (dorado, azul, verde del mockup).
+COLORES_GRAFICA = [
+    "#FBB718", "#408FD1", "#89BF50",
+    "#F28C8C", "#BFD8CC", "#7DC98F",
+]
 
-def configurar_estilos(raiz):
-    """Configura los estilos ttk sobre la ventana principal dada."""
-    import tkinter as tk
+# Tipografía del mockup sobre Windows.
+FUENTE = "Segoe UI"
+
+
+def configurar_tema():
+    """Aplica el modo oscuro de customtkinter a toda la aplicación."""
+    import customtkinter as ctk
+
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("dark")
+
+
+def configurar_tabla(raiz):
+    """Configura los estilos ttk de la tabla de movimientos (Treeview).
+
+    customtkinter no incluye tabla; se conserva el Treeview de ttk
+    con colores del tema para que no destaque sobre el resto.
+    """
     from tkinter import ttk
 
     estilo = ttk.Style(raiz)
     estilo.theme_use("clam")
-
     colores = COLORES
 
-    estilo.configure("TFrame", background=colores["fondo_contenido"])
-    estilo.configure("Tarjeta.TFrame", background=colores["fondo_tarjeta"])
-    estilo.configure("TLabel", background=colores["fondo_contenido"],
-                     foreground=colores["texto"], font=("Segoe UI", 10))
-    estilo.configure("EtiquetaFormulario.TLabel",
-                     background=colores["fondo_tarjeta"],
-                     foreground=colores["texto_secundario"], font=("Segoe UI", 10))
-    estilo.configure("Titulo.TLabel", font=("Segoe UI", 18, "bold"),
-                     foreground=colores["texto"])
-    estilo.configure("Subtitulo.TLabel", foreground=colores["texto_secundario"])
-
-    # Botón principal: dorado con texto oscuro (contraste alto).
-    estilo.configure("Primario.TButton", background=colores["acento"],
-                     foreground="#10241C", font=("Segoe UI", 10, "bold"),
-                     padding=(12, 6))
-    estilo.map("Primario.TButton",
-               background=[("active", "#F5D98D"), ("disabled", "#8A7A55")],
-               foreground=[("disabled", "#4A4436")])
-
-    # Botón secundario: píldora verde dentro de las tarjetas.
-    estilo.configure("Secundario.TButton", background=colores["boton_lateral"],
-                     foreground=colores["texto"], padding=(10, 4))
-    estilo.map("Secundario.TButton",
-               background=[("active", colores["fondo_lateral_hover"])])
-
-    # Campos de entrada: fondo claro para legibilidad del texto digitado.
-    estilo.configure("TEntry", fieldbackground=colores["campo_fondo"],
-                     foreground=colores["campo_texto"], padding=4)
-    estilo.configure("TCombobox", fieldbackground=colores["campo_fondo"],
-                     foreground=colores["campo_texto"], padding=4)
+    estilo.configure("Tablita.Treeview", background=colores["fondo_tarjeta"],
+                     foreground=colores["texto"],
+                     fieldbackground=colores["fondo_tarjeta"],
+                     rowheight=28, font=(FUENTE, 10), borderwidth=0)
+    estilo.configure("Tablita.Treeview.Heading",
+                     background=colores["boton_lateral"],
+                     foreground=colores["acento"], font=(FUENTE, 10, "bold"),
+                     relief="flat", borderwidth=0)
+    estilo.map("Tablita.Treeview",
+               background=[("selected", colores["acento"])],
+               foreground=[("selected", "#10241C")])
+    estilo.map("Tablita.Treeview.Heading",
+               background=[("active", colores["fondo_tarjeta"])])
     raiz.option_add("*TCombobox*Listbox*Background", colores["campo_fondo"])
     raiz.option_add("*TCombobox*Listbox*Foreground", colores["campo_texto"])
-
-    # Tabla de movimientos.
-    estilo.configure("Treeview", background=colores["fondo_tarjeta"],
-                     foreground=colores["texto"], fieldbackground=colores["fondo_tarjeta"],
-                     rowheight=26, font=("Segoe UI", 10))
-    estilo.configure("Treeview.Heading", background=colores["boton_lateral"],
-                     foreground=colores["acento"], font=("Segoe UI", 10, "bold"))
-    estilo.map("Treeview", background=[("selected", colores["acento"])],
-              foreground=[("selected", "#10241C")])
-    estilo.map("Treeview.Heading", background=[("active", colores["fondo_lateral_hover"])])

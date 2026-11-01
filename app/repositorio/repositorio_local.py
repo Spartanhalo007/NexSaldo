@@ -140,6 +140,24 @@ class RepositorioLocal:
             for fila in filas
         ]
 
+    def resumen_mensual(self, anno, mes):
+        """Devuelve el total de movimientos de un mes agrupado por tipo,
+        moneda y categoría.
+
+        Cada fila es (tipo_movimiento, moneda, categoria, total Decimal).
+        Los importes llegan como Decimal (columna NUMERIC), sin pasar por
+        float.
+        """
+        sql = """SELECT m.tipo_movimiento, m.moneda, c.nombre, SUM(m.valor)
+                   FROM movimiento_financiero m
+                   JOIN categoria c ON c.id = m.categoria_id
+                  WHERE EXTRACT(YEAR FROM m.fecha) = %s
+                    AND EXTRACT(MONTH FROM m.fecha) = %s
+                  GROUP BY m.tipo_movimiento, m.moneda, c.nombre
+                  ORDER BY c.nombre"""
+        filas = self.ejecutar_consulta(sql, (anno, mes))
+        return [(fila[0], fila[1], fila[2], fila[3]) for fila in filas]
+
     def eliminar_movimiento(self, id_movimiento) -> bool:
         """Elimina un movimiento por su id en una transacción.
 

@@ -78,6 +78,36 @@ class GestorFinanciero:
         """Devuelve los movimientos guardados, opcionalmente filtrados por tipo."""
         return self._repositorio.obtener_movimientos(tipo)
 
+    def resumen_del_mes(self, anno, mes):
+        """Resume los movimientos de un mes, separados por moneda.
+
+        Devuelve {moneda: {"ingresos": Decimal, "gastos": Decimal,
+        "gastos_por_categoria": {categoria: Decimal}}}. No suma importes
+        de monedas distintas ni calcula saldo: esa regla está pendiente
+        de aprobación.
+        """
+        if not isinstance(anno, int) or not isinstance(mes, int):
+            raise ValueError("El año y el mes deben ser números enteros.")
+        if not 1 <= mes <= 12:
+            raise ValueError("El mes debe estar entre 1 y 12.")
+
+        filas = self._repositorio.resumen_mensual(anno, mes)
+        resumen = {}
+        for tipo, moneda, categoria, total in filas:
+            datos = resumen.setdefault(
+                moneda, {"ingresos": Decimal("0"), "gastos": Decimal("0"),
+                         "gastos_por_categoria": {}}
+            )
+            if tipo == "INGRESO":
+                datos["ingresos"] += total
+            else:
+                datos["gastos"] += total
+                datos["gastos_por_categoria"][categoria] = (
+                    datos["gastos_por_categoria"].get(categoria, Decimal("0"))
+                    + total
+                )
+        return resumen
+
     def eliminar_movimiento(self, id_movimiento) -> bool:
         """Elimina un movimiento por su id. Devuelve True si existía."""
         return self._repositorio.eliminar_movimiento(id_movimiento)

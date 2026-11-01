@@ -128,3 +128,30 @@ def test_flujo_completo_por_el_gestor():
     )
     assert movimiento.id is not None
     assert gestor.eliminar_movimiento(movimiento.id) is True
+
+
+def test_resumen_mensual_agrupa_por_tipo_moneda_y_categoria():
+    """Inserta gastos ficticios y verifica la agrupación del resumen."""
+    gestor = _configurar()
+    repositorio = gestor._repositorio
+    _limpiar_movimientos_ficticios(repositorio)
+
+    primero = repositorio.insertar_movimiento(_movimiento_ficticio(
+        valor=Decimal("10000")))
+    segundo = repositorio.insertar_movimiento(_movimiento_ficticio(
+        valor=Decimal("5000"), categoria="Alimentación"))
+    try:
+        filas = repositorio.resumen_mensual(2026, 11)
+        fila_gastos = [f for f in filas
+                       if f[0] == "GASTO" and f[1] == "COP"
+                       and f[2] == "Otros gastos"]
+        assert len(fila_gastos) == 1
+        assert fila_gastos[0][3] == Decimal("10000")
+
+        fila_alimentacion = [f for f in filas
+                            if f[2] == "Alimentación"]
+        assert len(fila_alimentacion) == 1
+        assert fila_alimentacion[0][3] == Decimal("5000")
+    finally:
+        repositorio.eliminar_movimiento(primero.id)
+        repositorio.eliminar_movimiento(segundo.id)

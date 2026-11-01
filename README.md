@@ -14,14 +14,18 @@ Implementado hasta ahora:
   (`.env`), sin contraseñas en el código.
 - Esquema inicial de la base de datos: tablas `categoria` y
   `movimiento_financiero`.
-- Interfaz gráfica tkinter basada en el mockup de la tesis: barra lateral
+- Interfaz gráfica basada en el mockup de la tesis (customtkinter sobre
+  tkinter): barra lateral
   de navegación (Resumen, Cuentas, Gastos, Ingresos, Inversiones, Reportes,
   Categorías, Configuración, Modo Oscuro) y módulo de movimientos.
 - Gestión de ingresos y gastos (CU-01 parcial): registro con validaciones,
   consulta y eliminación con confirmación.
 - Lógica de negocio (`GestorFinanciero`, `MovimientoFinanciero`): importes
   con `Decimal`, valor mayor que cero, tipos INGRESO/GASTO, monedas COP/USD.
-- Pruebas automatizadas (28) de lógica y de integración con PostgreSQL.
+- Resumen financiero del mes (preparación de RF-05): dona de gastos por
+  categoría, totales por moneda (sin sumar monedas distintas) y desglose
+  por categoría.
+- Pruebas automatizadas (32) de lógica y de integración con PostgreSQL.
 
 Pendiente:
 
@@ -95,10 +99,19 @@ Con el servicio de PostgreSQL iniciado y el archivo `.env` configurado:
 .venv\Scripts\python -m app.main
 ```
 
-Abre la ventana principal: la barra lateral reproduce el mockup y los botones
-Gastos e Ingresos abren el módulo de movimientos (registro, consulta y
-eliminación con confirmación). El resto de módulos muestra un aviso de que
-están pendientes de implementación.
+Requiere instalar la dependencia nueva antes de la primera ejecución de esta
+versión:
+
+```powershell
+.venv\Scripts\pip install -r requirements.txt
+```
+
+Abre la ventana principal: la barra lateral reproduce el mockup (logo,
+botones en píldora, colores esmeralda y dorado) y la vista inicial es el
+Resumen Financiero del mes (dona de gastos por categoría, totales por
+moneda). Los botones Gastos e Ingresos abren el módulo de movimientos
+(registro, consulta y eliminación con confirmación). El resto de módulos
+muestra un aviso de que están pendientes de implementación.
 
 ## Ejecutar las pruebas automatizadas
 
@@ -111,7 +124,7 @@ integración se omiten y las de lógica se ejecutan igualmente):
 .venv\Scripts\python -m pytest pruebas
 ```
 
-Resultado esperado: 28 pruebas superadas. Los datos que insertan las pruebas
+Resultado esperado: 32 pruebas superadas. Los datos que insertan las pruebas
 son ficticios ("dato ficticio de prueba automatizada") y se eliminan solos.
 
 ## Decisiones registradas

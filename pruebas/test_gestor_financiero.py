@@ -46,6 +46,16 @@ class RepositorioDeMemoria:
                 return True
         return False
 
+    def resumen_mensual(self, anno, mes):
+        """Calcula el resumen en memoria, igual que el repositorio real."""
+        acumulado = {}
+        for m in self._movimientos:
+            if m.fecha.year == anno and m.fecha.month == mes:
+                clave = (m.tipo_movimiento, m.moneda, m.categoria)
+                acumulado[clave] = acumulado.get(clave, Decimal("0")) + m.valor
+        return [(tipo, moneda, categoria, total)
+                for (tipo, moneda, categoria), total in acumulado.items()]
+
 
 @pytest.fixture
 def gestor():
@@ -211,3 +221,35 @@ def test_totales_separan_monedas_sin_sumarlas():
 
 def test_totales_con_lista_vacia():
     assert totales_por_moneda([]) == {}
+
+
+# ----------------------------------------------------------------------
+# Resumen del mes (preparación de RF-05)
+# ----------------------------------------------------------------------
+
+def test_resumen_del_mes_separa_monedas_y_categorias(gestor):
+    gestor.registrar_movimiento("Ingreso", "2026-11-01", "1000000", "COP", "Salario")
+    gestor.registrar_movimiento("Gasto", "2026-11-02", "30000", "COP", "Alimentación")
+    gestor.registrar_movimiento("Gasto", "2026-11-03", "20000", "COP", "Alimentación")
+    gestor.registrar_movimiento("Gasto", "2026-11-04", "500", "USD", "Alimentación")
+    # De otro mes: no debe contar.
+    gestor.registrar_movimiento("Gasto", "2026-10-31", "999", "COP", "Transporte")
+
+    resumen = gestor.resumen_del_mes(2026, 11)
+
+    assert resumen["COP"]["ingresos"] == Decimal("1000000")
+    assert resumen["COP"]["gastos"] == Decimal("50000")
+    assert resumen["COP"]["gastos_por_categoria"]["Alimentación"] == Decimal("50000")
+    assert resumen["USD"]["gastos"] == Decimal("500")
+    assert "Transporte" not in resumen["COP"]["gastos_por_categoria"]
+
+
+def test_resumen_del_mes_sin_datos_devuelve_vacio(gestor):
+    assert gestor.resumen_del_mes(2030, 1) == {}
+
+
+def test_resumen_del_mes_rechaza_parametros_invalidos(gestor):
+    with pytest.raises(ValueError):
+        gestor.resumen_del_mes(2026, 13)
+    with pytest.raises(ValueError):
+        gestor.resumen_del_mes("2026", 11)

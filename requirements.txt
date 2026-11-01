@@ -1,6 +1,8 @@
-# Dependencias del Incremento 1.
-# Versiones verificadas en PyPI con soporte declarado para Python 3.11.
+# Dependencias de la aplicación.
+# Versiones verificadas con Python 3.11 (Windows).
 # psycopg2-binary 2.9.13: driver de PostgreSQL (binario, no requiere compilación en Windows).
 psycopg2-binary==2.9.13
 # python-dotenv 1.2.4: carga del archivo .env con los datos de conexión (evita secretos en el código).
 python-dotenv==1.2.4
+# customtkinter 6.0.0: interfaz moderna sobre tkinter (botones redondeados, tema oscuro).
+customtkinter==6.0.0
