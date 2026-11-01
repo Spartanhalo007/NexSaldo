@@ -6,6 +6,9 @@ oscuro y acentos dorados. La prioridad es la legibilidad: los campos de
 entrada usan fondo claro para que el texto digitado sea fácil de leer.
 """
 
+import sys
+from pathlib import Path
+
 # Paleta de colores (muestreada del mockup de la pantalla inicial).
 COLORES = {
     "fondo_lateral": "#0B3623",     # barra lateral: verde bosque oscuro
@@ -30,16 +33,43 @@ COLORES_GRAFICA = [
     "#F28C8C", "#BFD8CC", "#7DC98F",
 ]
 
-# Tipografía del mockup sobre Windows.
-FUENTE = "Segoe UI"
+def _cargar_instrument_sans():
+    """Carga los TTF de Instrument Sans en Windows (solo este proceso).
+
+    Los archivos vienen incluidos en app/gui/recursos/fuentes (licencia
+    OFL, ver OFL.txt en esa carpeta). Devuelve el nombre de la familia si
+    se cargó, o None si no (en ese caso se usa Segoe UI de respaldo).
+    """
+    carpeta = Path(__file__).resolve().parent / "recursos" / "fuentes"
+    if sys.platform != "win32" or not carpeta.is_dir():
+        return None
+    try:
+        import ctypes
+
+        FR_PRIVATE = 0x10  # disponible solo para este proceso
+        cargados = False
+        for ttf in carpeta.glob("*.ttf"):
+            if ctypes.windll.gdi32.AddFontResourceExW(str(ttf), FR_PRIVATE, 0):
+                cargados = True
+        return "Instrument Sans" if cargados else None
+    except Exception:
+        # Ante cualquier fallo, la interfaz usa Segoe UI sin detenerse.
+        return None
+
+
+# Tipografía del mockup (Instrument Sans) con respaldo en Segoe UI.
+FUENTE = _cargar_instrument_sans() or "Segoe UI"
 
 
 def configurar_tema():
-    """Aplica el modo oscuro de customtkinter a toda la aplicación."""
+    """Aplica el modo oscuro de customtkinter a toda la aplicación.
+
+    Los colores de los widgets se fijan explícitamente con la paleta del
+    mockup, así que no se carga un tema de color adicional.
+    """
     import customtkinter as ctk
 
     ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("dark")
 
 
 def configurar_tabla(raiz):
