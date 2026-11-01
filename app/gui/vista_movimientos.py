@@ -67,12 +67,12 @@ class VistaMovimientos(tk.Frame):
         tarjeta = ttk.Frame(cuerpo, style="Tarjeta.TFrame", padding=14)
         tarjeta.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
 
-        tk.Label(tarjeta, text="Registrar movimiento", style="EtiquetaFormulario.TLabel",
+        ttk.Label(tarjeta, text="Registrar movimiento", style="EtiquetaFormulario.TLabel",
                  font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2,
                                                       sticky="w", pady=(0, 10))
 
         def etiqueta(texto, fila):
-            tk.Label(tarjeta, text=texto, style="EtiquetaFormulario.TLabel").grid(
+            ttk.Label(tarjeta, text=texto, style="EtiquetaFormulario.TLabel").grid(
                 row=fila, column=0, sticky="w", pady=4)
 
         # Tipo de movimiento.
@@ -111,7 +111,7 @@ class VistaMovimientos(tk.Frame):
         self._campo_descripcion.grid(row=6, column=1, sticky="we", pady=4)
 
         # Acciones del formulario.
-        botones = tk.Frame(tarjeta, style="Tarjeta.TFrame")
+        botones = ttk.Frame(tarjeta, style="Tarjeta.TFrame")
         botones.grid(row=7, column=0, columnspan=2, sticky="we", pady=(12, 0))
         ttk.Button(botones, text="Guardar movimiento", style="Primario.TButton",
                    command=self._al_guardar).pack(side="left")
@@ -144,7 +144,7 @@ class VistaMovimientos(tk.Frame):
         contenedor = ttk.Frame(cuerpo, style="Tarjeta.TFrame", padding=10)
         contenedor.grid(row=0, column=1, sticky="nsew")
 
-        tk.Label(contenedor, text="Movimientos guardados", style="EtiquetaFormulario.TLabel",
+        ttk.Label(contenedor, text="Movimientos guardados", style="EtiquetaFormulario.TLabel",
                  font=("Segoe UI", 12, "bold")).pack(anchor="w")
 
         columnas = ("fecha", "tipo", "categoria", "valor", "moneda", "descripcion")
@@ -169,13 +169,13 @@ class VistaMovimientos(tk.Frame):
         barra.pack(side="right", fill="y", pady=(6, 0))
 
         # Fila de acciones y totales bajo la tabla.
-        pie = tk.Frame(contenedor, style="Tarjeta.TFrame")
+        pie = ttk.Frame(contenedor, style="Tarjeta.TFrame")
         pie.pack(fill="x", pady=(8, 0))
         ttk.Button(pie, text="Actualizar lista", style="Secundario.TButton",
                    command=self.refrescar).pack(side="left")
         ttk.Button(pie, text="Eliminar seleccionado", style="Secundario.TButton",
                    command=self._al_eliminar).pack(side="left", padx=8)
-        self._etiqueta_totales = tk.Label(pie, text="", style="EtiquetaFormulario.TLabel")
+        self._etiqueta_totales = ttk.Label(pie, text="", style="EtiquetaFormulario.TLabel")
         self._etiqueta_totales.pack(side="right")
 
     def refrescar(self):
