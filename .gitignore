@@ -1,0 +1,17 @@
+# Secretos locales: nunca versionar el archivo .env
+.env
+
+# Entorno virtual
+.venv/
+venv/
+
+# Caché de Python
+__pycache__/
+*.pyc
+
+# Herramientas de pruebas
+.pytest_cache/
+.coverage
+
+# Salidas de análisis (no forman parte de la aplicación)
+graphify-out/
