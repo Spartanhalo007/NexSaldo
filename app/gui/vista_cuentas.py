@@ -18,6 +18,7 @@ from tkinter import ttk, messagebox
 import customtkinter as ctk
 
 from app.gestor.gestor_financiero import totales_cuentas_por_moneda
+from app.gui.calendario import SelectorCalendario
 from app.gui.dialogo_cuenta import DialogoCuenta
 from app.gui.dialogo_transferencia import DialogoTransferencia
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla
@@ -33,6 +34,8 @@ class VistaCuentas(ctk.CTkFrame):
         self._gestor = gestor
         self._cuentas = []
         self._ids_fila_cuenta = {}
+        self._fecha_desde = None   # fecha de inicio del período elegido
+        self._fecha_hasta = None   # fecha final del período elegido
 
         self._construir_encabezado()
         self._construir_lista_cuentas()
@@ -130,24 +133,62 @@ class VistaCuentas(ctk.CTkFrame):
                      text_color=COLORES["texto"]).pack(
             anchor="w", padx=14, pady=(10, 4))
 
-        # Tabla de cuentas: nombre con ícono, saldo, moneda, inclusion.
+        # Tabla de cuentas: ícono en la columna árbol, nombre, saldo, moneda,
+        # inclusión y nota.
         self._tabla_cuentas = ttk.Treeview(
             tarjeta, columns=("nombre", "saldo", "moneda", "total", "nota"),
-            show="headings", selectmode="browse", height=5,
+            show="tree headings", selectmode="browse", height=5,
             style="Tablita.Treeview")
+        # Columna #0 (árbol): ahí se muestra el ícono de cada cuenta,
+        # a la izquierda del nombre.
+        self._tabla_cuentas.heading("#0", text="", anchor="w")
+        self._tabla_cuentas.column("#0", width=50, minwidth=50,
+                                  stretch=False, anchor="w")
         encabezados = {
-            "nombre": ("Cuenta", 220, "w"),
+            "nombre": ("Cuenta", 200, "w"),
             "saldo": ("Saldo actual", 140, "e"),
             "moneda": ("Divisa", 70, "w"),
             "total": ("En balance total", 120, "w"),
-            "nota": ("Nota", 220, "w"),
+            "nota":  ("Nota", 200, "w"),
         }
         for columna in ("nombre", "saldo", "moneda", "total", "nota"):
             texto, ancho, alineacion = encabezados[columna]
-            self._tabla_cuentas.heading(columna, text=texto)
-            self._tabla_cuentas.column(columna, width=ancho, anchor=alineacion)
+            # El título se alinea igual que los datos de su columna: así el
+            # encabezado no queda centrado mientras los valores van a la
+            # izquierda o derecha (causa del desfase reportado).
+            self._tabla_cuentas.heading(columna, text=texto,
+                                        anchor=alineacion)
+            self._tabla_cuentas.column(columna, width=ancho,
+                                        anchor=alineacion)
         self._tabla_cuentas.pack(fill="both", expand=True, padx=12,
-                                 pady=(2, 10))
+                                 pady=(2, 6))
+
+        # Detalle de la cuenta seleccionada: ícono grande a la izquierda,
+        # nombre, saldo, inclusión en el balance total y nota.
+        marco_detalle = ctk.CTkFrame(tarjeta, fg_color="transparent")
+        marco_detalle.pack(fill="x", padx=14, pady=(2, 10))
+        self._detalle_icono = ctk.CTkLabel(marco_detalle, text="", image=None)
+        self._detalle_icono.pack(side="left", padx=(0, 12))
+        marco_textos = ctk.CTkFrame(marco_detalle, fg_color="transparent")
+        marco_textos.pack(side="left", fill="x", expand=True)
+        self._detalle_titulo = ctk.CTkLabel(
+            marco_textos,
+            text="Seleccione una cuenta de la lista para ver su detalle.",
+            font=(FUENTE, 15, "bold"), text_color=COLORES["texto"],
+            anchor="w", justify="left")
+        self._detalle_titulo.pack(anchor="w")
+        self._detalle_saldo = ctk.CTkLabel(
+            marco_textos, text="", font=(FUENTE, 13),
+            text_color=COLORES["texto_secundario"], anchor="w",
+            justify="left")
+        self._detalle_saldo.pack(anchor="w")
+        self._detalle_extra = ctk.CTkLabel(
+            marco_textos, text="", font=(FUENTE, 11),
+            text_color=COLORES["texto_secundario"], anchor="w",
+            justify="left", wraplength=560)
+        self._detalle_extra.pack(anchor="w")
+        self._tabla_cuentas.bind("<<TreeviewSelect>>",
+                                self._al_seleccionar_cuenta)
         self._ids_fila_cuenta = {}
 
     def _refrescar_cuentas(self, cuentas_con_saldo):
@@ -158,13 +199,17 @@ class VistaCuentas(ctk.CTkFrame):
         self._cuentas = cuentas_con_saldo
 
         for cuenta, saldo in cuentas_con_saldo:
-            elemento = self._tabla_cuentas.insert("", "end", values=(
-                cuenta.nombre,
-                formatear_valor(saldo, cuenta.moneda),
-                cuenta.moneda,
-                "Sí" if cuenta.incluye_en_total else "No",
-                cuenta.nota or "",
-            ))
+            # El ícono de la cuenta (con su color) va en la columna árbol,
+            # a la izquierda del nombre.
+            elemento = self._tabla_cuentas.insert(
+                "", "end", image=icono_tk(cuenta.simbolo, cuenta.color, 20),
+                values=(
+                    cuenta.nombre,
+                    formatear_valor(saldo, cuenta.moneda),
+                    cuenta.moneda,
+                    "Sí" if cuenta.incluye_en_total else "No",
+                    cuenta.nota or "",
+                ))
             self._ids_fila_cuenta[elemento] = cuenta
 
     def _al_seleccionar_cuenta(self, evento=None):
@@ -180,14 +225,16 @@ class VistaCuentas(ctk.CTkFrame):
         except StopIteration:
             saldo = cuenta.saldo_inicial
 
-        self._detalle.configure(image=icono_tk(cuenta.simbolo, cuenta.color, 40))
-        self._texto_detalle.configure(
-            text=(f"{cuenta.nombre} · {formatear_valor(saldo, cuenta.moneda)} "
-                  f"({cuenta.moneda}) · "
-                  + ("incluida en el balance total"
+        self._detalle_icono.configure(
+            image=icono_tk(cuenta.simbolo, cuenta.color, 48))
+        self._detalle_titulo.configure(text=cuenta.nombre)
+        self._detalle_saldo.configure(
+            text=f"{formatear_valor(saldo, cuenta.moneda)} ({cuenta.moneda})")
+        inclusion = ("Incluida en el balance total"
                      if cuenta.incluye_en_total
                      else "NO incluida en el balance total")
-                  + (f" · {cuenta.nota}" if cuenta.nota else "")))
+        nota = f" · Nota: {cuenta.nota}" if cuenta.nota else ""
+        self._detalle_extra.configure(text=inclusion + nota)
 
     # ------------------------------------------------------------------
     # Historial de transferencias
@@ -218,28 +265,30 @@ class VistaCuentas(ctk.CTkFrame):
                 command=self._al_cambiar_filtro,
             ).pack(side="left", padx=(0, 10))
 
-        # Período personalizado: dos fechas AAAA-MM-DD.
+        # Período personalizado: se eligen las dos fechas en un calendario.
         self._marco_periodo = ctk.CTkFrame(tarjeta, fg_color="transparent")
-        ctk.CTkLabel(self._marco_periodo, text="Desde (AAAA-MM-DD):",
+        ctk.CTkLabel(self._marco_periodo, text="Fecha de inicio:",
                      font=(FUENTE, 10),
                      text_color=COLORES["texto_secundario"]).pack(
             side="left", padx=(0, 4))
-        self._campo_desde = ctk.CTkEntry(self._marco_periodo, width=100,
-                                         corner_radius=6)
-        self._campo_desde.pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(self._marco_periodo, text="Hasta (AAAA-MM-DD):",
+        self._boton_desde = ctk.CTkButton(
+            self._marco_periodo, text="Elegir fecha", width=110, height=26,
+            corner_radius=13, font=(FUENTE, 10),
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            command=self._elegir_fecha_inicio)
+        self._boton_desde.pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(self._marco_periodo, text="Fecha final:",
                      font=(FUENTE, 10),
                      text_color=COLORES["texto_secundario"]).pack(
             side="left", padx=(0, 4))
-        self._campo_hasta = ctk.CTkEntry(self._marco_periodo, width=100,
-                                         corner_radius=6)
-        self._campo_hasta.pack(side="left", padx=(0, 8))
-        ctk.CTkButton(self._marco_periodo, text="Aplicar período",
-                      width=110, height=26, corner_radius=13,
-                      font=(FUENTE, 10),
-                      fg_color=COLORES["boton_lateral"],
-                      hover_color=COLORES["hover_lateral"],
-                      command=self.refrescar).pack(side="left")
+        self._boton_hasta = ctk.CTkButton(
+            self._marco_periodo, text="Elegir fecha", width=110, height=26,
+            corner_radius=13, font=(FUENTE, 10),
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            command=self._elegir_fecha_final)
+        self._boton_hasta.pack(side="left")
 
         # Tabla de transferencias.
         columnas = ("fecha", "origen", "destino", "valor", "moneda",
@@ -257,7 +306,9 @@ class VistaCuentas(ctk.CTkFrame):
         }
         for columna in columnas:
             texto, ancho, alineacion = encabezados[columna]
-            self._tabla_transferencias.heading(columna, text=texto)
+            # Mismo anclaje para título y datos: evita el desfase.
+            self._tabla_transferencias.heading(columna, text=texto,
+                                              anchor=alineacion)
             self._tabla_transferencias.column(columna, width=ancho,
                                               anchor=alineacion)
         self._tabla_transferencias.pack(fill="both", expand=True, padx=12,
@@ -273,33 +324,47 @@ class VistaCuentas(ctk.CTkFrame):
                       hover_color=COLORES["hover_lateral"],
                       command=self._ver_imagen).pack(side="left")
 
-        # Detalle de la cuenta seleccionada (con su ícono de color).
-        fila_detalle = ctk.CTkFrame(tarjeta, fg_color="transparent")
-        fila_detalle.pack(fill="x", padx=14, pady=(0, 8))
-        self._detalle = ctk.CTkLabel(fila_detalle, text="",
-                                     font=(FUENTE, 11),
-                                     text_color=COLORES["texto_secundario"],
-                                     image=None)
-        self._detalle.pack(side="left", padx=(0, 8))
-        self._texto_detalle = ctk.CTkLabel(
-            fila_detalle, text="Seleccione una cuenta de la lista para ver "
-                               "su detalle.",
-            font=(FUENTE, 11), text_color=COLORES["texto_secundario"],
-            wraplength=500, justify="left")
-        self._texto_detalle.pack(side="left")
-        self._tabla_cuentas.bind("<<TreeviewSelect>>",
-                                 self._al_seleccionar_cuenta)
-
     # ------------------------------------------------------------------
     # Filtros del historial
     # ------------------------------------------------------------------
 
     def _al_cambiar_filtro(self):
-        """Muestra (o oculta) los campos del período personalizado."""
+        """Muestra (u oculta) las fechas del período personalizado."""
         if self._filtro_actual.get() == "Período":
             self._marco_periodo.pack(fill="x", padx=14, pady=(4, 0))
+            # Al entrar al período se abren los dos calendarios seguidos:
+            # primero la fecha de inicio y luego la fecha final.
+            if self._fecha_desde is None:
+                self._elegir_fecha_inicio()
         else:
             self._marco_periodo.pack_forget()
+        self._refrescar_historial()
+
+    def _elegir_fecha_inicio(self):
+        """Abre el calendario para escoger la fecha de inicio."""
+        SelectorCalendario(self, self._al_elegir_inicio,
+                           fecha_inicial=self._fecha_desde)
+
+    def _al_elegir_inicio(self, fecha):
+        self._fecha_desde = fecha
+        self._boton_desde.configure(text=fecha.isoformat())
+        SelectorCalendario(self, self._al_elegir_final, fecha_inicial=fecha)
+
+    def _elegir_fecha_final(self):
+        """Abre el calendario para escoger (o cambiar) la fecha final."""
+        SelectorCalendario(self, self._al_elegir_final,
+                           fecha_inicial=self._fecha_hasta
+                           or self._fecha_desde)
+
+    def _al_elegir_final(self, fecha):
+        if self._fecha_desde is not None and fecha < self._fecha_desde:
+            messagebox.showwarning(
+                "Fechas incoherentes",
+                "La fecha final no puede ser anterior a la fecha de inicio.",
+            )
+            return
+        self._fecha_hasta = fecha
+        self._boton_hasta.configure(text=fecha.isoformat())
         self._refrescar_historial()
 
     def _rango_del_filtro(self):
@@ -320,8 +385,8 @@ class VistaCuentas(ctk.CTkFrame):
         if filtro == "Año":
             return (hoy.replace(month=1, day=1),
                     hoy.replace(month=12, day=31))
-        # Período personalizado: fechas digitadas por el usuario.
-        return self._campo_desde.get().strip(), self._campo_hasta.get().strip()
+        # Período personalizado: fechas elegidas en el calendario.
+        return self._fecha_desde, self._fecha_hasta
 
     # ------------------------------------------------------------------
     # Actualización de datos
@@ -346,10 +411,8 @@ class VistaCuentas(ctk.CTkFrame):
         """Consulta las transferencias del filtro activo y llena la tabla."""
         inicio, fin = self._rango_del_filtro()
         if self._filtro_actual.get() == "Período":
-            # Las fechas del período personalizado se validan antes de
-            # consultar (formato AAAA-MM-DD obligatorio).
-            inicio = self._validar_fecha_periodo(inicio, "Desde")
-            fin = self._validar_fecha_periodo(fin, "Hasta")
+            # Sin las dos fechas no hay nada que consultar todavía (el
+            # calendario se abre justo al elegir el período).
             if inicio is None or fin is None:
                 return
 
@@ -376,20 +439,6 @@ class VistaCuentas(ctk.CTkFrame):
                 ("📎 " if imagen else "") + (comentarios or ""),
             ))
             self._ids_fila_transferencia[elemento] = fila
-
-    def _validar_fecha_periodo(self, texto, etiqueta):
-        """Convierte una fecha digitada (AAAA-MM-DD) o devuelve None."""
-        from datetime import datetime
-
-        try:
-            return datetime.strptime(texto, "%Y-%m-%d").date()
-        except ValueError:
-            messagebox.showwarning(
-                "Fecha inválida",
-                f"La fecha «{etiqueta}» debe tener el formato AAAA-MM-DD "
-                "(ejemplo: 2026-11-03).",
-            )
-            return None
 
     def _ver_imagen(self):
         """Abre la imagen adjunta de la transferencia seleccionada."""
