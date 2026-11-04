@@ -155,3 +155,107 @@ def test_resumen_mensual_agrupa_por_tipo_moneda_y_categoria():
     finally:
         repositorio.eliminar_movimiento(primero.id)
         repositorio.eliminar_movimiento(segundo.id)
+
+
+# ----------------------------------------------------------------------
+# Cuentas y transferencias (módulo Cuentas)
+# ----------------------------------------------------------------------
+
+def _cuenta_ficticia(**extras):
+    """Crea una cuenta claramente ficticia para las pruebas."""
+    from app.modelo.cuenta import Cuenta
+    datos = dict(
+        id=None, nombre="Cuenta ficticia de prueba", moneda="COP",
+        saldo_inicial=Decimal("1000"), simbolo="banco", color="#FBB718",
+        incluye_en_total=True, nota="cuenta ficticia de prueba automatizada",
+    )
+    datos.update(extras)
+    return Cuenta(**datos)
+
+
+def _limpiar_cuentas_ficticias(repositorio):
+    """Elimina cuentas y transferencias ficticias creadas por las pruebas."""
+    filas = repositorio.ejecutar_consulta(
+        "SELECT id FROM cuenta WHERE nota = %s",
+        ("cuenta ficticia de prueba automatizada",),
+    )
+    conexion = repositorio.conectar()
+    with conexion:
+        with conexion.cursor() as cursor:
+            for (id_cuenta,) in filas:
+                cursor.execute(
+                    "DELETE FROM transferencia "
+                    "WHERE cuenta_origen_id = %s OR cuenta_destino_id = %s",
+                    (id_cuenta, id_cuenta),
+                )
+                cursor.execute("DELETE FROM cuenta WHERE id = %s",
+                               (id_cuenta,))
+
+
+def test_insertar_y_consultar_cuenta_con_saldo():
+    gestor = _configurar()
+    repositorio = gestor._repositorio
+    _limpiar_cuentas_ficticias(repositorio)
+
+    guardada = repositorio.insertar_cuenta(_cuenta_ficticia())
+    assert guardada.id is not None
+
+    cuentas = repositorio.obtener_cuentas()
+    propia = [par for par in cuentas if par[0].id == guardada.id]
+    assert len(propia) == 1
+    cuenta, saldo = propia[0]
+    assert cuenta.nombre == "Cuenta ficticia de prueba"
+    assert saldo == Decimal("1000")
+
+    _limpiar_cuentas_ficticias(repositorio)
+
+
+def test_transferencia_actualiza_saldos_y_se_filtra_por_fecha():
+    gestor = _configurar()
+    repositorio = gestor._repositorio
+    _limpiar_cuentas_ficticias(repositorio)
+
+    from app.modelo.transferencia import Transferencia
+
+    origen = repositorio.insertar_cuenta(_cuenta_ficticia(
+        nombre="Ficticia origen", saldo_inicial=Decimal("1000")))
+    destino = repositorio.insertar_cuenta(_cuenta_ficticia(
+        nombre="Ficticia destino", saldo_inicial=Decimal("0")))
+    try:
+        repositorio.insertar_transferencia(Transferencia(
+            id=None, cuenta_origen_id=origen.id,
+            cuenta_destino_id=destino.id,
+            valor=Decimal("400"), moneda="COP", fecha=date(2026, 11, 3),
+            comentarios="dato ficticio de prueba automatizada",
+        ))
+        repositorio.conectar().commit()
+
+        saldos = repositorio.saldos_de_cuentas()
+        assert saldos[origen.id] == Decimal("600")
+        assert saldos[destino.id] == Decimal("400")
+
+        # Filtro por fecha: solo la del 3 de noviembre.
+        del_dia = repositorio.obtener_transferencias(
+            date(2026, 11, 3), date(2026, 11, 3))
+        assert len(del_dia) == 1
+        assert del_dia[0][2] == "Ficticia origen"
+        assert del_dia[0][3] == "Ficticia destino"
+
+        fuera_de_fecha = repositorio.obtener_transferencias(
+            date(2026, 11, 10), date(2026, 11, 30))
+        assert fuera_de_fecha == []
+    finally:
+        _limpiar_cuentas_ficticias(repositorio)
+
+
+def test_color_reciente_se_registra_y_se_consulta():
+    gestor = _configurar()
+    repositorio = gestor._repositorio
+
+    repositorio.registrar_color_reciente("#ABCDEF")
+    repositorio.registrar_color_reciente("#123456")
+    repositorio.conectar().commit()
+
+    recientes = repositorio.obtener_colores_recientes()
+    assert "#123456" in recientes
+    assert "#ABCDEF" in recientes

@@ -14,6 +14,7 @@ from pathlib import Path
 import customtkinter as ctk
 
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
+from app.gui.vista_cuentas import VistaCuentas
 from app.gui.vista_movimientos import VistaMovimientos
 from app.gui.vista_resumen import VistaResumen
 
@@ -24,7 +25,7 @@ RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
 # (texto visible, módulo asociado)
 NAVEGACION = [
     ("Resumen", "resumen"),
-    ("Cuentas", "pendiente"),
+    ("Cuentas", "cuentas"),
     ("Gastos", "movimientos"),
     ("Ingresos", "movimientos"),
     ("Inversiones", "pendiente"),
@@ -35,7 +36,6 @@ NAVEGACION = [
 ]
 
 MODULOS_PENDIENTES = {
-    "Cuentas": "El módulo de cuentas está pendiente de definición (saldos iniciales, tratamiento de monedas).",
     "Inversiones": "El registro de inversiones bursátiles se implementará en una etapa posterior (CU-03, CU-04).",
     "Reportes": "Los reportes y gráficos se definirán a partir de los requerimientos (RF-06).",
     "Categorías": "La edición de categorías desde la aplicación está pendiente para un incremento posterior.",
@@ -130,6 +130,8 @@ class VentanaPrincipal(ctk.CTk):
     def _al_navegar(self, modulo, texto):
         if modulo == "resumen":
             self._mostrar_resumen()
+        elif modulo == "cuentas":
+            self._mostrar_cuentas()
         elif modulo == "movimientos":
             filtro = "GASTO" if texto == "Gastos" else "INGRESO"
             self._mostrar_movimientos(filtro_tipo=filtro, titulo=texto)
@@ -146,6 +148,11 @@ class VentanaPrincipal(ctk.CTk):
     def _mostrar_resumen(self):
         self._limpiar_area()
         self._vista_actual = VistaResumen(self._area, self._gestor)
+        self._vista_actual.pack(fill="both", expand=True)
+
+    def _mostrar_cuentas(self):
+        self._limpiar_area()
+        self._vista_actual = VistaCuentas(self._area, self._gestor)
         self._vista_actual.pack(fill="both", expand=True)
 
     def _mostrar_movimientos(self, filtro_tipo, titulo):

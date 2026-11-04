@@ -15,3 +15,6 @@ __pycache__/
 
 # Salidas de análisis (no forman parte de la aplicación)
 graphify-out/
+
+# Imágenes adjuntas de transferencias (datos personales, no se versionan).
+adjuntos/

@@ -17,3 +17,25 @@ NOMBRES_MESES = [
 def nombre_mes(anno, mes):
     """Devuelve el nombre legible de un mes, ej.: 'noviembre de 2026'."""
     return f"{NOMBRES_MESES[mes - 1]} de {anno}"
+
+
+NOMBRES_DIAS = [
+    "lunes", "martes", "miércoles", "jueves",
+    "viernes", "sábado", "domingo",
+]
+
+
+def fecha_legible(fecha, hoy=None):
+    """Formatea una fecha para el usuario.
+
+    Ejemplos: 'hoy, 3 de noviembre de 2026 (martes)' o
+    '3 de noviembre de 2026 (domingo)'. El día de la semana entre paréntesis.
+    """
+    from datetime import date as _date
+
+    if hoy is None:
+        hoy = _date.today()
+    dia_semana = NOMBRES_DIAS[fecha.weekday()]
+    texto = f"{fecha.day} de {nombre_mes(fecha.year, fecha.month)}"
+    prefijo = "hoy, " if fecha == hoy else ""
+    return f"{prefijo}{texto} ({dia_semana})"

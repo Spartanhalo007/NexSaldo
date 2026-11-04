@@ -6,3 +6,6 @@ psycopg2-binary==2.9.13
 python-dotenv==1.2.4
 # customtkinter 6.0.0: interfaz moderna sobre tkinter (botones redondeados, tema oscuro).
 customtkinter==6.0.0
+
+# Pillow 13.0.0: procesamiento de imágenes (colorear íconos de cuentas, validar adjuntos).
+pillow==13.0.0

@@ -33,6 +33,14 @@ COLORES_GRAFICA = [
     "#F28C8C", "#BFD8CC", "#7DC98F",
 ]
 
+# Colores predeterminados ofrecidos al crear una cuenta (del mockup:
+# dorado, azul, verde; el resto del propio tema).
+COLORES_PREDETERMINADOS = [
+    "#FBB718", "#408FD1", "#89BF50",
+    "#F28C8C", "#BFD8CC", "#7DC98F",
+    "#FFFFFF", "#8A8F98",
+]
+
 def _cargar_instrument_sans():
     """Carga los TTF de Instrument Sans en Windows (solo este proceso).
 
