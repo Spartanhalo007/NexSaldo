@@ -483,38 +483,39 @@ class RepositorioLocal:
         conexion.commit()
         return transferencia.con_id(nuevo_id)
 
-    def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None) -> List[Transferencia]:
-        condiciones = []
-        parametros = []
-        if fecha_inicio is not None:
-            condiciones.append("fecha >= %s")
-            parametros.append(fecha_inicio)
-        if fecha_fin is not None:
-            condiciones.append("fecha <= %s")
-            parametros.append(fecha_fin)
-        where_sql = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
-        filas = self.ejecutar_consulta(
-            f"""
-            SELECT id, cuenta_origen_id, cuenta_destino_id, valor, moneda, fecha, comentarios, imagen
-            FROM transferencia
-            {where_sql}
-            ORDER BY fecha DESC, id DESC
-            """,
-            tuple(parametros),
-        )
-        return [
-            Transferencia(
-                id=f[0],
-                cuenta_origen_id=f[1],
-                cuenta_destino_id=f[2],
-                valor=Decimal(str(f[3])),
-                moneda=f[4].strip(),
-                fecha=f[5],
-                comentarios=f[6],
-                imagen=f[7],
-            )
-            for f in filas
-        ]
+    def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
+     condiciones = []
+     parametros = []
+     if fecha_inicio is not None:
+         condiciones.append("t.fecha >= %s")
+         parametros.append(fecha_inicio)
+     if fecha_fin is not None:
+         condiciones.append("t.fecha <= %s")
+         parametros.append(fecha_fin)
+     where_sql = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
+     filas = self.ejecutar_consulta(
+         f"""
+         SELECT t.id, t.fecha, co.nombre, cd.nombre, t.valor, t.moneda, t.comentarios
+         FROM transferencia t
+         JOIN cuenta co ON co.id = t.cuenta_origen_id
+         JOIN cuenta cd ON cd.id = t.cuenta_destino_id
+         {where_sql}
+         ORDER BY t.fecha DESC, t.id DESC
+         """,
+         tuple(parametros),
+     )
+     return [
+         (
+             f[0],
+             f[1],
+             f[2],
+             f[3],
+             Decimal(str(f[4])),
+             f[5].strip(),
+             f[6],
+         )
+         for f in filas
+     ]
 
     def registrar_color_reciente(self, color: str):
         conexion = self.conectar()
