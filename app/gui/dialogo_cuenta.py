@@ -18,7 +18,7 @@ from app.gestor.gestor_financiero import (
 from app.gui.campo_moneda import CampoMoneda
 from app.gui.dialogo_color import DialogoColor
 from app.gui.estilos import COLORES, COLORES_PREDETERMINADOS, FUENTE
-from app.gui.iconos import GRIS, icono_tk
+from app.gui.iconos import GRIS, icono_ctk
 
 NOMBRES_SIMBOLOS = {
     "cash": "Efectivo",
@@ -130,7 +130,7 @@ class DialogoCuenta(ctk.CTkToplevel):
                 fg_color=COLORES["boton_lateral"],
                 hover_color=COLORES["hover_lateral"],
                 text="",
-                image=icono_tk(clave, GRIS, 26),
+                image=icono_ctk(clave, GRIS, 26),
                 command=lambda c=clave: self._elegir_simbolo(c),
             )
             boton.grid(row=fila_simbolo, column=columna_simbolo,
@@ -239,10 +239,10 @@ class DialogoCuenta(ctk.CTkToplevel):
             if otra_clave == clave:
                 color_icono = self._color_elegido or "#FFFFFF"
                 boton.configure(fg_color=VERDE_SELECCION,
-                                image=icono_tk(clave, color_icono, 26))
+                                image=icono_ctk(clave, color_icono, 26))
             else:
                 boton.configure(fg_color=COLORES["boton_lateral"],
-                                image=icono_tk(otra_clave, GRIS, 26))
+                                image=icono_ctk(otra_clave, GRIS, 26))
 
     def _elegir_color(self, color):
         """Aplica el color elegido al símbolo seleccionado (botón verde)."""
@@ -250,7 +250,7 @@ class DialogoCuenta(ctk.CTkToplevel):
         if self._simbolo_elegido:
             self._botones_simbolo[self._simbolo_elegido].configure(
                 fg_color=VERDE_SELECCION,
-                image=icono_tk(self._simbolo_elegido,
+                image=icono_ctk(self._simbolo_elegido,
                                self._color_elegido, 26))
 
     # ------------------------------------------------------------------

@@ -22,3 +22,12 @@ def test_icono_inexistente_usa_respaldado():
     """Un símbolo desconocido no rompe: usa el ícono de moneda."""
     imagen = icono_pil("clave_que_no_existe", "#FFFFFF", 32)
     assert imagen.size == (32, 32)
+
+
+def test_icono_ctk_devuelve_imagen_escalable():
+    """icono_ctk debe dar una CTkImage (no PhotoImage) del tamaño pedido."""
+    from app.gui.iconos import icono_ctk
+
+    imagen = icono_ctk("moneda", "#408FD1", 26)
+    assert type(imagen).__name__ == "CTkImage"
+    assert imagen._size == (26, 26)

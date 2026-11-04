@@ -89,7 +89,10 @@ class SelectorCalendario(ctk.CTkToplevel):
                     hover_color=COLORES["hover_lateral"],
                     text_color="#10241C" if es_elegida else COLORES["texto"],
                     font=(FUENTE, 11),
-                    command=lambda d=dia: self._elegir(dia),
+                    # `d=dia` fija el día de ESTE botón: sin eso, el comando
+                    # tomaba el último valor del mes (bug: día equivocado o
+                    # "day is out of range" en meses con celdas vacías).
+                    command=lambda d=dia: self._elegir(d),
                 ).grid(row=fila, column=columna, padx=1, pady=1)
 
     def _mes_anterior(self):

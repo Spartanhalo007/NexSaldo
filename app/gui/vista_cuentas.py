@@ -23,7 +23,7 @@ from app.gui.dialogo_cuenta import DialogoCuenta
 from app.gui.dialogo_transferencia import DialogoTransferencia
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla
 from app.gui.formato import formatear_valor
-from app.gui.iconos import icono_tk
+from app.gui.iconos import icono_ctk, icono_tk
 
 
 class VistaCuentas(ctk.CTkFrame):
@@ -226,7 +226,7 @@ class VistaCuentas(ctk.CTkFrame):
             saldo = cuenta.saldo_inicial
 
         self._detalle_icono.configure(
-            image=icono_tk(cuenta.simbolo, cuenta.color, 48))
+            image=icono_ctk(cuenta.simbolo, cuenta.color, 48))
         self._detalle_titulo.configure(text=cuenta.nombre)
         self._detalle_saldo.configure(
             text=f"{formatear_valor(saldo, cuenta.moneda)} ({cuenta.moneda})")
