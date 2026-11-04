@@ -133,8 +133,9 @@ class Calculadora(ctk.CTkFrame):
         self._en_binaria = True
         self._mostrar(str(resultado))
         # El resultado se escribe en el campo de cantidad de la transferencia.
+        # Con coma decimal (el campo formatea los miles por su cuenta).
         self._campo.delete(0, "end")
-        self._campo.insert(0, str(resultado))
+        self._campo.insert(0, str(resultado).replace(".", ","))
 
     def _reiniciar(self):
         self._acumulado = None

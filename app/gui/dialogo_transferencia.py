@@ -17,6 +17,7 @@ import customtkinter as ctk
 from app.gestor.gestor_financiero import ErrorValidacion
 from app.gui.calculadora import Calculadora
 from app.gui.calendario import SelectorCalendario
+from app.gui.campo_moneda import CampoMoneda
 from app.gui.estilos import COLORES, FUENTE
 from app.gui.formato import fecha_legible, formatear_valor
 
@@ -55,8 +56,10 @@ class DialogoTransferencia(ctk.CTkToplevel):
     # ------------------------------------------------------------------
 
     def _construir_formulario(self):
-        cuerpo = ctk.CTkFrame(self, fg_color="transparent")
-        cuerpo.pack(fill="both", expand=True, padx=18, pady=12)
+        # El cuerpo es desplazable: todos los campos quedan alcanzables
+        # incluso en pantallas pequeñas.
+        cuerpo = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, padx=14, pady=(8, 0))
 
         ctk.CTkLabel(cuerpo, text="Nueva transferencia",
                      font=(FUENTE, 18, "bold"),
@@ -91,12 +94,13 @@ class DialogoTransferencia(ctk.CTkToplevel):
         fila_valor.pack(fill="x", pady=(12, 0))
         columna_valor = ctk.CTkFrame(fila_valor, fg_color="transparent")
         columna_valor.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(columna_valor, text="Cantidad *",
+        ctk.CTkLabel(columna_valor, text="Cantidad (ej.: 15.000 o 15.000,50)",
                      font=(FUENTE, 11),
                      text_color=COLORES["texto_secundario"]).pack(
             anchor="w", pady=(0, 2))
-        self._campo_valor = ctk.CTkEntry(columna_valor, width=200,
-                                         corner_radius=8)
+        # Los miles se separan solos mientras se escribe (estilo colombiano).
+        self._campo_valor = CampoMoneda(columna_valor, width=200,
+                                        corner_radius=8)
         self._campo_valor.pack(anchor="w")
 
         columna_moneda = ctk.CTkFrame(fila_valor, fg_color="transparent")
@@ -273,7 +277,8 @@ class DialogoTransferencia(ctk.CTkToplevel):
             transferencia = self._gestor.crear_transferencia(
                 cuenta_origen_id=origen.id,
                 cuenta_destino_id=destino.id,
-                valor_texto=self._campo_valor.get(),
+                # El campo envía el valor sin separadores de miles.
+                valor_texto=self._campo_valor.obtener_valor(),
                 fecha_texto=self._fecha_elegida.isoformat(),
                 comentarios=self._campo_comentarios.get(),
                 imagen=self._ruta_imagen,
