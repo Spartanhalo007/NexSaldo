@@ -1,15 +1,21 @@
-"""Lógica de negocio para gestionar cuentas, ingresos, gastos, categorías y etiquetas."""
+"""Lógica de negocio para gestionar cuentas, ingresos, gastos, categorías, etiquetas y divisas."""
 
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.modelo.categoria import Categoria
+from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
 from app.modelo.etiqueta import Etiqueta
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
+from app.servicio.servicio_bursatil import (
+    ErrorConsultaBursatil,
+    SIMBOLO_USD_COP,
+    ServicioBursatil,
+)
 
 TIPOS_VALIDOS = ("INGRESO", "GASTO")
 MONEDAS_VALIDAS = ("COP", "USD")
@@ -32,7 +38,6 @@ SIMBOLOS_VALIDOS = (
     "puerquito",
 )
 
-# Catálogo categorizado de íconos para crear categorías de gastos e ingresos
 CATALOGO_SIMBOLOS_CATEGORIAS: Dict[str, List[Tuple[str, str]]] = {
     "Finanzas": [
         ("factura", "Factura / Recibo"),
@@ -121,7 +126,7 @@ CATALOGO_SIMBOLOS_CATEGORIAS: Dict[str, List[Tuple[str, str]]] = {
 }
 
 TODOS_LOS_SIMBOLOS_CATEGORIA = tuple(
-     {clave for lista in CATALOGO_SIMBOLOS_CATEGORIAS.values() for clave, _ in lista}
+    {clave for lista in CATALOGO_SIMBOLOS_CATEGORIAS.values() for clave, _ in lista}
     | set(SIMBOLOS_VALIDOS)
 )
 
@@ -158,14 +163,69 @@ def totales_cuentas_por_moneda(cuentas_con_saldo: Iterable[Tuple[Cuenta, Decimal
 
 
 class GestorFinanciero:
-    """Coordina las validaciones y el acceso al repositorio."""
+    """Coordina las validaciones, el acceso al repositorio y las consultas bursátiles en tiempo real."""
 
-    def __init__(self, repositorio):
+    def __init__(self, repositorio, servicio_bursatil: Optional[ServicioBursatil] = None):
         self._repositorio = repositorio
+        self._servicio_bursatil = servicio_bursatil or ServicioBursatil()
+        self._cotizacion_usd_cop_memoria: Optional[Cotizacion] = None
         self._categorias_memoria_extra: Dict[str, Categoria] = {
             c.nombre: c for c in CATEGORIAS_GASTO_PREDETERMINADAS
         }
         self._etiquetas_memoria_extra: Dict[str, Etiqueta] = {}
+
+    # ------------------------------------------------------------------
+    # Conversión en tiempo real USD <-> COP (Yahoo Finance / yfinance)
+    # ------------------------------------------------------------------
+    def obtener_tasa_usd_cop(self, forzar_actualizacion: bool = False) -> Optional[Cotizacion]:
+        """Devuelve la cotización en tiempo real USD->COP o el último valor guardado localmente."""
+        if not forzar_actualizacion:
+            if self._cotizacion_usd_cop_memoria is not None:
+                return self._cotizacion_usd_cop_memoria
+            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                guardada = self._repositorio.obtener_ultima_cotizacion(SIMBOLO_USD_COP)
+                if guardada is not None:
+                    self._cotizacion_usd_cop_memoria = guardada
+                    return guardada
+
+        try:
+            nueva = self._servicio_bursatil.consultar_tasa_usd_cop()
+            if hasattr(self._repositorio, "guardar_cotizaciones"):
+                guardadas = self._repositorio.guardar_cotizaciones([nueva])
+                if guardadas:
+                    nueva = guardadas[0]
+            self._cotizacion_usd_cop_memoria = nueva
+            return nueva
+        except ErrorConsultaBursatil:
+            if self._cotizacion_usd_cop_memoria is not None:
+                return self._cotizacion_usd_cop_memoria
+            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                return self._repositorio.obtener_ultima_cotizacion(SIMBOLO_USD_COP)
+            return None
+
+    def convertir_usd_a_cop(self, monto_usd: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
+        """Convierte dólares (USD) a pesos colombianos (COP) redondeando a 2 decimales."""
+        tasa_efectiva = tasa
+        if tasa_efectiva is None:
+            cot = self.obtener_tasa_usd_cop()
+            if cot is None:
+                raise ErrorValidacion("No hay una tasa de cambio USD/COP disponible.")
+            tasa_efectiva = cot.precio
+        if tasa_efectiva <= Decimal("0"):
+            raise ErrorValidacion("La tasa de cambio debe ser mayor que cero.")
+        return (monto_usd * tasa_efectiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def convertir_cop_a_usd(self, monto_cop: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
+        """Convierte pesos colombianos (COP) a dólares (USD) redondeando a 2 decimales."""
+        tasa_efectiva = tasa
+        if tasa_efectiva is None:
+            cot = self.obtener_tasa_usd_cop()
+            if cot is None:
+                raise ErrorValidacion("No hay una tasa de cambio USD/COP disponible.")
+            tasa_efectiva = cot.precio
+        if tasa_efectiva <= Decimal("0"):
+            raise ErrorValidacion("La tasa de cambio debe ser mayor que cero.")
+        return (monto_cop / tasa_efectiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
     # Categorías (compatibilidad total + creación customizada)
@@ -179,7 +239,6 @@ class GestorFinanciero:
             if categorias:
                 return categorias
 
-        # Fallback para RepositorioDeMemoria en pruebas unitarias
         nombres_repo = self._repositorio.obtener_categorias()
         resultado: List[Categoria] = []
         vistos = set()
@@ -243,7 +302,6 @@ class GestorFinanciero:
         if hasattr(self._repositorio, "insertar_categoria"):
             guardada = self._repositorio.insertar_categoria(nueva)
         else:
-            # Soporte en memoria para dobles de prueba
             if hasattr(self._repositorio, "_categorias") and nombre_limpio not in self._repositorio._categorias:
                 self._repositorio._categorias.append(nombre_limpio)
             guardada = nueva.con_id(len(self._categorias_memoria_extra) + 10)
@@ -351,9 +409,7 @@ class GestorFinanciero:
         es_programado: bool = False,
         frecuencia: Optional[str] = None,
     ) -> MovimientoFinanciero:
-        """Método especializado para el módulo de Gastos con COP por defecto."""
         fecha_str = fecha_texto if fecha_texto is not None else date.today().isoformat()
-        # Si la categoría es una de las 7 predeterminadas y el repositorio aún no la tenía en memoria, la asegura
         categorias_actuales = self._repositorio.obtener_categorias()
         if categoria in self._categorias_memoria_extra and categoria not in categorias_actuales:
             cat_obj = self._categorias_memoria_extra[categoria]
@@ -383,7 +439,6 @@ class GestorFinanciero:
         fecha_fin: Optional[date] = None,
     ) -> List[MovimientoFinanciero]:
         tipo_filtro = self._validar_tipo(tipo) if tipo is not None else None
-        # Compatibilidad con RepositorioDeMemoria que sólo acepta (tipo=None)
         try:
             movimientos = self._repositorio.obtener_movimientos(
                 tipo_filtro, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin
@@ -407,7 +462,6 @@ class GestorFinanciero:
         fecha_inicio: Optional[date] = None,
         fecha_fin: Optional[date] = None,
     ) -> Dict[str, Dict[str, object]]:
-        """Calcula el total y desglose por categoría de gastos en el periodo indicado."""
         if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
             raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
 
@@ -548,7 +602,7 @@ class GestorFinanciero:
         )
         return self._repositorio.insertar_transferencia(transferencia)
 
-    def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None) -> List[Transferencia]:
+    def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
         return self._repositorio.obtener_transferencias(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
     # ------------------------------------------------------------------

@@ -3,27 +3,18 @@
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 import psycopg2
 
 from app.configuracion import ConfiguracionBD
 from app.modelo.categoria import Categoria
+from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
 from app.modelo.etiqueta import Etiqueta
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
 
 RUTA_ESQUEMA = Path(__file__).resolve().parents[2] / "sql" / "esquema_inicial.sql"
-
-CATEGORIAS_PREDETERMINADAS_BASE = (
-    Categoria(None, "Salud", "GASTO", "corazon_pulso", "#F28C8C", True),
-    Categoria(None, "Ocio", "GASTO", "billetera", "#408FD1", True),
-    Categoria(None, "Casa", "GASTO", "casa", "#FBB718", True),
-    Categoria(None, "Café", "GASTO", "cubiertos", "#D98A4E", True),
-    Categoria(None, "Educación", "GASTO", "graduacion", "#9B7EDE", True),
-    Categoria(None, "Regalos", "GASTO", "regalo", "#E86F9A", True),
-    Categoria(None, "Alimentación", "GASTO", "mercado", "#7DC98F", True),
-)
 
 
 class RepositorioLocal:
@@ -321,38 +312,6 @@ class RepositorioLocal:
         filas = self.ejecutar_consulta(sql, (anno, mes))
         return [(f[0], f[1].strip(), f[2], Decimal(str(f[3]))) for f in filas]
 
-    def resumen_por_rango(
-        self,
-        fecha_inicio: Optional[date] = None,
-        fecha_fin: Optional[date] = None,
-        tipo: str = "GASTO",
-    ) -> List[Tuple[str, str, Decimal, str, str]]:
-        """Retorna [(moneda, categoria_nombre, total_decimal, color, simbolo), ...] para el rango."""
-        condiciones = ["m.tipo_movimiento = %s"]
-        parametros: list = [tipo]
-        if fecha_inicio is not None:
-            condiciones.append("m.fecha >= %s")
-            parametros.append(fecha_inicio)
-        if fecha_fin is not None:
-            condiciones.append("m.fecha <= %s")
-            parametros.append(fecha_fin)
-
-        where_sql = "WHERE " + " AND ".join(condiciones)
-        sql = f"""
-            SELECT m.moneda, c.nombre, SUM(m.valor),
-                   COALESCE(c.color, '#FBB718'), COALESCE(c.simbolo, 'mercado')
-            FROM movimiento_financiero m
-            JOIN categoria c ON c.id = m.categoria_id
-            {where_sql}
-            GROUP BY m.moneda, c.nombre, c.color, c.simbolo
-            ORDER BY SUM(m.valor) DESC, c.nombre ASC
-        """
-        filas = self.ejecutar_consulta(sql, tuple(parametros))
-        return [
-            (f[0].strip(), f[1], Decimal(str(f[2])), f[3], f[4])
-            for f in filas
-        ]
-
     def eliminar_movimiento(self, id_movimiento: int) -> bool:
         conexion = self.conectar()
         with conexion.cursor() as cursor:
@@ -365,7 +324,7 @@ class RepositorioLocal:
         return eliminado
 
     # ------------------------------------------------------------------
-    # Cuentas y Saldos (descuenta gastos asociados a cuenta_id e incluye ingresos)
+    # Cuentas y Saldos
     # ------------------------------------------------------------------
     def insertar_cuenta(self, cuenta: Cuenta) -> Cuenta:
         conexion = self.conectar()
@@ -541,3 +500,61 @@ class RepositorioLocal:
             (maximo,),
         )
         return [f[0] for f in filas]
+
+    # ------------------------------------------------------------------
+    # Cotizaciones y tasas de cambio en tiempo real (Yahoo Finance)
+    # ------------------------------------------------------------------
+    def guardar_cotizaciones(self, cotizaciones: Iterable[Cotizacion]) -> List[Cotizacion]:
+        conexion = self.conectar()
+        guardadas: List[Cotizacion] = []
+        with conexion.cursor() as cursor:
+            for cot in cotizaciones:
+                cursor.execute(
+                    """
+                    INSERT INTO cotizacion (simbolo, fecha, precio, moneda, fuente)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (simbolo, fecha) DO UPDATE SET
+                        precio = EXCLUDED.precio,
+                        moneda = EXCLUDED.moneda,
+                        fuente = EXCLUDED.fuente,
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    RETURNING id
+                    """,
+                    (
+                        cot.simbolo.strip().upper(),
+                        cot.fecha,
+                        cot.precio,
+                        cot.moneda.strip().upper(),
+                        cot.fuente,
+                    ),
+                )
+                nuevo_id = cursor.fetchone()[0]
+                guardadas.append(cot.con_id(nuevo_id))
+        conexion.commit()
+        return guardadas
+
+    def obtener_cotizaciones(self, simbolo: str) -> List[Cotizacion]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT id, simbolo, fecha, precio, moneda, fuente
+            FROM cotizacion
+            WHERE simbolo = %s
+            ORDER BY fecha DESC, id DESC
+            """,
+            (simbolo.strip().upper(),),
+        )
+        return [
+            Cotizacion(
+                id=f[0],
+                simbolo=f[1],
+                fecha=f[2],
+                precio=Decimal(str(f[3])),
+                moneda=f[4].strip(),
+                fuente=f[5],
+            )
+            for f in filas
+        ]
+
+    def obtener_ultima_cotizacion(self, simbolo: str) -> Optional[Cotizacion]:
+        cotizaciones = self.obtener_cotizaciones(simbolo)
+        return cotizaciones[0] if cotizaciones else None

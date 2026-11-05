@@ -1,5 +1,5 @@
 -- Esquema de base de datos local para NexSaldo
--- Incluye tablas originales y extensiones del Módulo de Gastos
+-- Incluye tablas originales, Módulo de Gastos y Cotizaciones en tiempo real (Yahoo Finance)
 
 CREATE TABLE IF NOT EXISTS categoria (
     id SERIAL PRIMARY KEY,
@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS categoria (
     fecha_creacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Migraciones seguras en caso de que la tabla categoria ya exista de una versión previa
 ALTER TABLE categoria ADD COLUMN IF NOT EXISTS tipo VARCHAR(10) NOT NULL DEFAULT 'GASTO';
 ALTER TABLE categoria ADD COLUMN IF NOT EXISTS simbolo VARCHAR(50) NOT NULL DEFAULT 'mercado';
 ALTER TABLE categoria ADD COLUMN IF NOT EXISTS color CHAR(7) NOT NULL DEFAULT '#FBB718';
@@ -48,7 +47,6 @@ CREATE TABLE IF NOT EXISTS movimiento_financiero (
     fecha_registro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Migraciones seguras para movimiento_financiero
 ALTER TABLE movimiento_financiero ADD COLUMN IF NOT EXISTS cuenta_id INTEGER REFERENCES cuenta(id) ON DELETE SET NULL;
 ALTER TABLE movimiento_financiero ADD COLUMN IF NOT EXISTS imagen VARCHAR(300);
 ALTER TABLE movimiento_financiero ADD COLUMN IF NOT EXISTS es_programado BOOLEAN NOT NULL DEFAULT FALSE;
@@ -85,7 +83,18 @@ CREATE TABLE IF NOT EXISTS color_reciente (
     fecha_uso TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Categorías predeterminadas del módulo de Gastos (con sus íconos circulares y colores)
+-- Tabla para conservar cotizaciones y tasas de cambio en tiempo real de Yahoo Finance
+CREATE TABLE IF NOT EXISTS cotizacion (
+    id SERIAL PRIMARY KEY,
+    simbolo VARCHAR(20) NOT NULL,
+    fecha DATE NOT NULL,
+    precio NUMERIC(16,4) NOT NULL CHECK (precio > 0),
+    moneda CHAR(3) NOT NULL,
+    fuente VARCHAR(40) NOT NULL DEFAULT 'Yahoo Finance (Tiempo real)',
+    fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (simbolo, fecha)
+);
+
 INSERT INTO categoria (nombre, tipo, simbolo, color, es_predeterminada) VALUES
     ('Salud', 'GASTO', 'corazon_pulso', '#F28C8C', TRUE),
     ('Ocio', 'GASTO', 'billetera', '#408FD1', TRUE),

@@ -1,6 +1,7 @@
-"""Diálogo/Formulario completo para Añadir Gasto en NexSaldo."""
+"""Diálogo/Formulario completo para Añadir Gasto en NexSaldo con conversión en tiempo real USD <-> COP."""
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 import os
 from pathlib import Path
 import shutil
@@ -12,13 +13,14 @@ from PIL import Image
 from app.gestor.gestor_financiero import ErrorValidacion, GestorFinanciero
 from app.gui.calculadora import Calculadora
 from app.gui.calendario import SelectorCalendario
-from app.gui.campo_moneda import CampoMoneda
+from app.gui.campo_moneda import CampoMoneda, formatear_dinero
 from app.gui.dialogo_categoria import DialogoCategoria
 from app.gui.dialogo_etiqueta import DialogoEtiquetas
 from app.gui.estilos import COLORES, FUENTE
 from app.gui.formato import formatear_valor
 from app.gui.iconos import GRIS, icono_ctk
 from app.modelo.categoria import Categoria
+from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 
@@ -26,10 +28,18 @@ RUTA_ADJUNTOS = Path(__file__).resolve().parents[2] / "adjuntos"
 MAXIMO_ADJUNTO_BYTES = 2 * 1024 * 1024
 
 
+def _decimal_a_texto_moneda(valor: Decimal) -> str:
+    """Convierte un Decimal a formato de CampoMoneda (con coma decimal y separadores de miles)."""
+    cadena = f"{valor:.2f}"
+    entero, decimal = cadena.split(".")
+    if decimal == "00":
+        return formatear_dinero(entero)
+    return formatear_dinero(f"{entero},{decimal}")
+
+
 class DialogoGasto(ctk.CTkToplevel):
-    """Formulario para añadir un gasto con monto, divisa (COP por defecto), calculadora,
-    cuenta, categorías circulares (+ botón Más gris), fechas rápidas (Hoy/Ayer/Último/Calendario),
-    etiquetas 100% customizables, comentario y foto."""
+    """Formulario para añadir un gasto con monto, divisa (COP por defecto) y conversión
+    bidireccional automática en tiempo real USD <-> COP mediante Yahoo Finance (yfinance)."""
 
     def __init__(
         self,
@@ -43,6 +53,8 @@ class DialogoGasto(ctk.CTkToplevel):
         self._al_guardar = al_guardar
 
         self._moneda_elegida = "COP"  # Default siempre Peso Colombiano
+        self._cotizacion_trm: Optional[Cotizacion] = None
+        self._sincronizando_conversion = False
         self._cuenta_elegida_id: Optional[int] = None
         self._mapa_cuentas: Dict[str, Cuenta] = {}
         self._categoria_elegida: str = "Alimentación"
@@ -52,7 +64,7 @@ class DialogoGasto(ctk.CTkToplevel):
         self._ruta_imagen: Optional[str] = None
 
         self.title("Añadir gasto")
-        self.geometry("680x820")
+        self.geometry("680x840")
         self.resizable(False, True)
         self.configure(fg_color=COLORES["fondo_lateral"])
         self.transient(master)
@@ -62,7 +74,7 @@ class DialogoGasto(ctk.CTkToplevel):
 
     def _construir_interfaz(self):
         cuerpo = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", width=640, height=770
+            self, fg_color="transparent", width=640, height=790
         )
         cuerpo.pack(fill="both", expand=True, padx=16, pady=14)
 
@@ -74,7 +86,7 @@ class DialogoGasto(ctk.CTkToplevel):
         ).pack(anchor="w", pady=(0, 10))
 
         # ==================================================================
-        # 1. CANTIDAD GASTADA + DIVISA (COP default / USD) + CALCULADORA
+        # 1. CANTIDAD GASTADA + DIVISA (COP default / USD con conversión) + CALCULADORA
         # ==================================================================
         marco_monto = ctk.CTkFrame(
             cuerpo, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
@@ -91,19 +103,28 @@ class DialogoGasto(ctk.CTkToplevel):
         fila_monto_calc = ctk.CTkFrame(marco_monto, fg_color="transparent")
         fila_monto_calc.pack(fill="x", padx=16, pady=(0, 14))
 
-        # Columna izquierda: CampoMoneda + selector de divisa al lado + selector de cuenta abajo
         col_izquierda = ctk.CTkFrame(fila_monto_calc, fg_color="transparent")
         col_izquierda.pack(side="left", fill="both", expand=True, padx=(0, 12))
 
         fila_input_divisa = ctk.CTkFrame(col_izquierda, fg_color="transparent")
-        fila_input_divisa.pack(fill="x", pady=(0, 12))
+        fila_input_divisa.pack(fill="x", pady=(0, 8))
+
+        self._etiqueta_campo_principal = ctk.CTkLabel(
+            fila_input_divisa,
+            text="COP $",
+            font=(FUENTE, 13, "bold"),
+            text_color=COLORES["acento"],
+            width=52,
+        )
+        self._etiqueta_campo_principal.pack(side="left", padx=(0, 4))
 
         self._campo_valor = CampoMoneda(
-            fila_input_divisa, width=210, height=40, corner_radius=8
+            fila_input_divisa, width=180, height=40, corner_radius=8
         )
-        self._campo_valor.pack(side="left", padx=(0, 10))
+        self._campo_valor.pack(side="left", padx=(0, 8))
+        self._campo_valor.bind("<KeyRelease>", self._al_escribir_campo_principal, add="+")
+        self._campo_valor.bind("<FocusIn>", lambda _e: self._apuntar_calculadora(self._campo_valor), add="+")
 
-        # Selector de divisa al lado (COP siempre por defecto)
         self._var_moneda = ctk.StringVar(value="COP")
         self._selector_divisa = ctk.CTkSegmentedButton(
             fila_input_divisa,
@@ -120,9 +141,69 @@ class DialogoGasto(ctk.CTkToplevel):
         )
         self._selector_divisa.pack(side="left")
 
-        # Debajo de cantidad y divisa: Seleccionar la cuenta en la que se añadirá el gasto
+        # --- Panel de conversión bidireccional en tiempo real (al seleccionar USD) ---
+        self._marco_conversion_usd = ctk.CTkFrame(
+            col_izquierda, fg_color=COLORES["boton_lateral"], corner_radius=10
+        )
+
         ctk.CTkLabel(
-            col_izquierda,
+            self._marco_conversion_usd,
+            text="Equivalente en Pesos Colombianos (escribe en USD o en COP):",
+            font=(FUENTE, 11, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+
+        fila_equiv_cop = ctk.CTkFrame(self._marco_conversion_usd, fg_color="transparent")
+        fila_equiv_cop.pack(fill="x", padx=10, pady=(0, 6))
+
+        ctk.CTkLabel(
+            fila_equiv_cop,
+            text="COP $",
+            font=(FUENTE, 13, "bold"),
+            text_color=COLORES["acento"],
+            width=52,
+        ).pack(side="left", padx=(0, 4))
+
+        self._campo_valor_cop_equiv = CampoMoneda(
+            fila_equiv_cop, width=180, height=36, corner_radius=8
+        )
+        self._campo_valor_cop_equiv.pack(side="left", padx=(0, 8))
+        self._campo_valor_cop_equiv.bind(
+            "<KeyRelease>", self._al_escribir_campo_cop_equivalente, add="+"
+        )
+        self._campo_valor_cop_equiv.bind(
+            "<FocusIn>",
+            lambda _e: self._apuntar_calculadora(self._campo_valor_cop_equiv),
+            add="+",
+        )
+
+        ctk.CTkButton(
+            fila_equiv_cop,
+            text="↻ Tasa",
+            width=72,
+            height=32,
+            corner_radius=8,
+            fg_color=COLORES["fondo_tarjeta"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 11, "bold"),
+            command=lambda: self._cargar_tasa_yahoo(forzar=True),
+        ).pack(side="left")
+
+        self._etiqueta_tasa_yahoo = ctk.CTkLabel(
+            self._marco_conversion_usd,
+            text="Consultando cotización en tiempo real en Yahoo Finance...",
+            font=(FUENTE, 11),
+            text_color=COLORES["texto_secundario"],
+        )
+        self._etiqueta_tasa_yahoo.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # --- Selección de Cuenta ---
+        self._contenedor_selector_cuenta = ctk.CTkFrame(col_izquierda, fg_color="transparent")
+        self._contenedor_selector_cuenta.pack(fill="x")
+
+        ctk.CTkLabel(
+            self._contenedor_selector_cuenta,
             text="Cuenta de origen del gasto:",
             font=(FUENTE, 13, "bold"),
             text_color=COLORES["texto"],
@@ -130,7 +211,7 @@ class DialogoGasto(ctk.CTkToplevel):
 
         self._var_cuenta = ctk.StringVar(value="Sin cuenta asociada")
         self._combo_cuenta = ctk.CTkOptionMenu(
-            col_izquierda,
+            self._contenedor_selector_cuenta,
             values=["Sin cuenta asociada"],
             variable=self._var_cuenta,
             fg_color=COLORES["boton_lateral"],
@@ -145,14 +226,14 @@ class DialogoGasto(ctk.CTkToplevel):
         self._combo_cuenta.pack(anchor="w")
 
         self._etiqueta_info_cuenta = ctk.CTkLabel(
-            col_izquierda,
+            self._contenedor_selector_cuenta,
             text="Moneda por defecto: Peso colombiano (COP)",
             font=(FUENTE, 11),
             text_color=COLORES["texto_secundario"],
         )
         self._etiqueta_info_cuenta.pack(anchor="w", pady=(4, 0))
 
-        # Al lado derecho: Calculadora tal como aparece en el módulo de cuentas
+        # Al lado derecho: Calculadora
         col_calculadora = ctk.CTkFrame(fila_monto_calc, fg_color="transparent")
         col_calculadora.pack(side="right")
 
@@ -387,17 +468,94 @@ class DialogoGasto(ctk.CTkToplevel):
         ).pack(side="right")
 
     # ------------------------------------------------------------------
-    # Lógica de Divisa y Cuentas
+    # Lógica de Divisa, Conversión Bidireccional USD <-> COP y Cuentas
     # ------------------------------------------------------------------
+    def _apuntar_calculadora(self, campo_objetivo: CampoMoneda):
+        if hasattr(self, "_calculadora") and hasattr(self._calculadora, "_campo_destino"):
+            self._calculadora._campo_destino = campo_objetivo
+
+    def _cargar_tasa_yahoo(self, forzar: bool = False):
+        self._cotizacion_trm = self._gestor.obtener_tasa_usd_cop(
+            forzar_actualizacion=forzar
+        )
+        if self._cotizacion_trm is not None:
+            tasa_fmt = formatear_valor(self._cotizacion_trm.precio, "COP")
+            self._etiqueta_tasa_yahoo.configure(
+                text=f"1 USD = {tasa_fmt}  •  Yahoo Finance en tiempo real ({self._cotizacion_trm.fecha.isoformat()})",
+                text_color=COLORES["exito"],
+            )
+            self._al_escribir_campo_principal()
+        else:
+            self._etiqueta_tasa_yahoo.configure(
+                text="Sin conexión a Yahoo Finance (verifica internet o instala yfinance).",
+                text_color=COLORES["error"],
+            )
+
+    def _al_escribir_campo_principal(self, _evento=None):
+        """Si está en USD y el usuario escribe dólares, calcula automáticamente los COP equivalentes."""
+        if self._moneda_elegida != "USD" or self._sincronizando_conversion:
+            return
+        if self._cotizacion_trm is None:
+            return
+
+        texto_usd = self._campo_valor.obtener_valor().strip()
+        self._sincronizando_conversion = True
+        try:
+            if not texto_usd:
+                self._campo_valor_cop_equiv.delete(0, "end")
+                return
+            monto_usd = Decimal(texto_usd.replace(",", "."))
+            if monto_usd <= Decimal("0"):
+                self._campo_valor_cop_equiv.delete(0, "end")
+                return
+            monto_cop = self._gestor.convertir_usd_a_cop(
+                monto_usd, tasa=self._cotizacion_trm.precio
+            )
+            self._campo_valor_cop_equiv.delete(0, "end")
+            self._campo_valor_cop_equiv.insert(0, _decimal_a_texto_moneda(monto_cop))
+        except (InvalidOperation, ErrorValidacion):
+            pass
+        finally:
+            self._sincronizando_conversion = False
+
+    def _al_escribir_campo_cop_equivalente(self, _evento=None):
+        """Si el usuario escribe lo que pagó en COP, calcula automáticamente los USD equivalentes."""
+        if self._moneda_elegida != "USD" or self._sincronizando_conversion:
+            return
+        if self._cotizacion_trm is None:
+            return
+
+        texto_cop = self._campo_valor_cop_equiv.obtener_valor().strip()
+        self._sincronizando_conversion = True
+        try:
+            if not texto_cop:
+                self._campo_valor.delete(0, "end")
+                return
+            monto_cop = Decimal(texto_cop.replace(",", "."))
+            if monto_cop <= Decimal("0"):
+                self._campo_valor.delete(0, "end")
+                return
+            monto_usd = self._gestor.convertir_cop_a_usd(
+                monto_cop, tasa=self._cotizacion_trm.precio
+            )
+            self._campo_valor.delete(0, "end")
+            self._campo_valor.insert(0, _decimal_a_texto_moneda(monto_usd))
+        except (InvalidOperation, ErrorValidacion):
+            pass
+        finally:
+            self._sincronizando_conversion = False
+
     def _cargar_cuentas_disponibles(self):
         cuentas_con_saldo = self._gestor.obtener_cuentas()
         self._mapa_cuentas.clear()
         opciones = ["Sin cuenta asociada"]
 
         for cuenta, saldo in cuentas_con_saldo:
+            etiqueta = f"{cuenta.nombre} [{cuenta.moneda}] ({formatear_valor(saldo, cuenta.moneda)})"
+            self._mapa_cuentas[etiqueta] = cuenta
             if cuenta.moneda == self._moneda_elegida:
-                etiqueta = f"{cuenta.nombre} ({formatear_valor(saldo, cuenta.moneda)})"
-                self._mapa_cuentas[etiqueta] = cuenta
+                opciones.insert(1, etiqueta)
+            else:
                 opciones.append(etiqueta)
 
         self._combo_cuenta.configure(values=opciones)
@@ -411,9 +569,22 @@ class DialogoGasto(ctk.CTkToplevel):
 
     def _al_cambiar_divisa(self, nueva_moneda: str):
         self._moneda_elegida = nueva_moneda
-        self._etiqueta_info_cuenta.configure(
-            text=f"Mostrando cuentas en {nueva_moneda}"
-        )
+        if nueva_moneda == "USD":
+            self._etiqueta_campo_principal.configure(text="USD $")
+            self._marco_conversion_usd.pack(
+                fill="x", pady=(0, 8), before=self._contenedor_selector_cuenta
+            )
+            self._cargar_tasa_yahoo(forzar=False)
+            self._etiqueta_info_cuenta.configure(
+                text="Puedes digitar en USD o en COP; el otro campo se convierte automáticamente."
+            )
+        else:
+            self._etiqueta_campo_principal.configure(text="COP $")
+            self._marco_conversion_usd.pack_forget()
+            self._apuntar_calculadora(self._campo_valor)
+            self._etiqueta_info_cuenta.configure(
+                text="Moneda por defecto: Peso colombiano (COP)"
+            )
         self._cargar_cuentas_disponibles()
 
     def _al_seleccionar_cuenta(self, seleccion: str):
@@ -470,7 +641,6 @@ class DialogoGasto(ctk.CTkToplevel):
                 text_color=COLORES["acento"] if activa else COLORES["texto"],
             ).pack(pady=(3, 0))
 
-        # Al lado de las categorías: Símbolo gris de sumar llamado "Más"
         idx_mas = len(categorias)
         fila_mas = idx_mas // columnas
         col_mas = idx_mas % columnas
@@ -673,9 +843,21 @@ class DialogoGasto(ctk.CTkToplevel):
     # ------------------------------------------------------------------
     def _guardar_gasto(self):
         valor_limpio = self._campo_valor.obtener_valor()
+        moneda_guardar = self._moneda_elegida
         comentario = self._campo_comentario.get().strip() or None
 
-        # Verificar si la categoría seleccionada tiene gasto programado activo
+        cuenta_obj = None
+        if self._cuenta_elegida_id is not None:
+            cuenta_obj = self._gestor.obtener_cuenta(self._cuenta_elegida_id)
+
+        if self._moneda_elegida == "USD" and self._cotizacion_trm is not None:
+            valor_cop_equiv = self._campo_valor_cop_equiv.obtener_valor().strip()
+            if cuenta_obj is not None and cuenta_obj.moneda == "COP" and valor_cop_equiv:
+                nota_conv = f"(USD ${valor_limpio} a tasa {self._cotizacion_trm.precio})"
+                comentario = f"{comentario} {nota_conv}".strip() if comentario else nota_conv
+                valor_limpio = valor_cop_equiv
+                moneda_guardar = "COP"
+
         mapa_cats = {c.nombre: c for c in self._gestor.obtener_categorias_detalladas("GASTO")}
         cat_obj = mapa_cats.get(self._categoria_elegida)
         es_prog = bool(cat_obj.gasto_programado) if cat_obj else False
@@ -684,7 +866,7 @@ class DialogoGasto(ctk.CTkToplevel):
         try:
             movimiento = self._gestor.registrar_gasto(
                 valor_texto=valor_limpio,
-                moneda=self._moneda_elegida,
+                moneda=moneda_guardar,
                 cuenta_id=self._cuenta_elegida_id,
                 categoria=self._categoria_elegida,
                 fecha_texto=self._fecha_elegida.isoformat(),
