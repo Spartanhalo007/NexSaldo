@@ -484,38 +484,39 @@ class RepositorioLocal:
         return transferencia.con_id(nuevo_id)
 
     def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
-     condiciones = []
-     parametros = []
-     if fecha_inicio is not None:
-         condiciones.append("t.fecha >= %s")
-         parametros.append(fecha_inicio)
-     if fecha_fin is not None:
-         condiciones.append("t.fecha <= %s")
-         parametros.append(fecha_fin)
-     where_sql = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
-     filas = self.ejecutar_consulta(
-         f"""
-         SELECT t.id, t.fecha, co.nombre, cd.nombre, t.valor, t.moneda, t.comentarios
-         FROM transferencia t
-         JOIN cuenta co ON co.id = t.cuenta_origen_id
-         JOIN cuenta cd ON cd.id = t.cuenta_destino_id
-         {where_sql}
-         ORDER BY t.fecha DESC, t.id DESC
-         """,
-         tuple(parametros),
-     )
-     return [
-         (
-             f[0],
-             f[1],
-             f[2],
-             f[3],
-             Decimal(str(f[4])),
-             f[5].strip(),
-             f[6],
-         )
-         for f in filas
-     ]
+        condiciones = []
+        parametros = []
+        if fecha_inicio is not None:
+            condiciones.append("t.fecha >= %s")
+            parametros.append(fecha_inicio)
+        if fecha_fin is not None:
+            condiciones.append("t.fecha <= %s")
+            parametros.append(fecha_fin)
+        where_sql = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
+        filas = self.ejecutar_consulta(
+            f"""
+            SELECT t.id, t.fecha, co.nombre, cd.nombre, t.valor, t.moneda, t.comentarios, t.imagen
+            FROM transferencia t
+            JOIN cuenta co ON co.id = t.cuenta_origen_id
+            JOIN cuenta cd ON cd.id = t.cuenta_destino_id
+            {where_sql}
+            ORDER BY t.fecha DESC, t.id DESC
+            """,
+            tuple(parametros),
+        )
+        return [
+            (
+                f[0],
+                f[1],
+                f[2],
+                f[3],
+                Decimal(str(f[4])),
+                f[5].strip(),
+                f[6],
+                f[7],
+            )
+            for f in filas
+        ]
 
     def registrar_color_reciente(self, color: str):
         conexion = self.conectar()
