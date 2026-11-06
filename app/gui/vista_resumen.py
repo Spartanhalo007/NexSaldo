@@ -1,13 +1,18 @@
-"""Vista de Resumen Financiero con soporte de todas las divisas del mundo
-(COP + 4 últimas usadas + orden alfabético A-Z) y modo 'Solo esta moneda' vs 'Todo convertido'."""
+"""Vista de Resumen Financiero con selector de fecha clicable estilo Shopify
+(Día, Semana, Mes, Trimestre/Quarter, Año, YTD, Rango personalizado) y filtro mundial de divisas."""
 
 from datetime import date
 from decimal import Decimal
 import tkinter as tk
 import customtkinter as ctk
 
+from app.gui.dialogo_periodo_shopify import (
+    DialogoPeriodoShopify,
+    calcular_rango_preset,
+    desplazar_rango,
+)
 from app.gui.estilos import COLORES, COLORES_GRAFICA, FUENTE
-from app.gui.formato import formatear_valor, nombre_mes
+from app.gui.formato import formatear_valor
 from app.gui.selector_moneda import BarraFiltroMoneda
 
 TAMANO_DONA = 220
@@ -15,8 +20,9 @@ GROSOR_DONA = 32
 
 
 class VistaResumen(ctk.CTkFrame):
-    """Muestra el resumen mensual de gastos por categoría, ingresos e inversiones,
-    filtrando solo por la divisa seleccionada o convirtiendo todo a la divisa elegida."""
+    """Muestra el resumen de gastos por categoría, ingresos y cuentas/inversiones,
+    permitiendo hacer clic en el botón del mes ('Noviembre de 2026') para abrir el selector
+    estilo Shopify (Día, Semana, Mes, Quarter, Año, YTD, Rango personalizado)."""
 
     def __init__(self, master, gestor, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -25,6 +31,10 @@ class VistaResumen(ctk.CTkFrame):
         hoy = date.today()
         self._anno = hoy.year
         self._mes = hoy.month
+        self._preset_periodo = "ESTE_MES"
+        self._fecha_inicio, self._fecha_fin, self._texto_periodo = calcular_rango_preset(
+            "ESTE_MES", referencia=hoy
+        )
         self._moneda_actual = "COP"
         self._incluir_todas_convertidas = False
 
@@ -46,43 +56,50 @@ class VistaResumen(ctk.CTkFrame):
             text_color=COLORES["texto"],
         ).pack(side="left")
 
-        # Controles de navegación de mes
+        # Controles de navegación de periodo: ◀ [ 📅 Noviembre de 2026 ▾ ] ▶
         marco_mes = ctk.CTkFrame(fila_titulo, fg_color="transparent")
         marco_mes.pack(side="right")
 
         ctk.CTkButton(
             marco_mes,
             text="◀",
-            width=32,
-            height=30,
+            width=34,
+            height=34,
             corner_radius=8,
             fg_color=COLORES["boton_lateral"],
             hover_color=COLORES["hover_lateral"],
             text_color=COLORES["texto"],
             font=(FUENTE, 12, "bold"),
-            command=lambda: self._cambiar_mes(-1),
+            command=lambda: self._desplazar_periodo(-1),
         ).pack(side="left", padx=4)
 
-        self._etiqueta_mes = ctk.CTkLabel(
+        # Botón clicable que muestra 'Noviembre de 2026' (o el rango activo) y abre el popup estilo Shopify
+        self._boton_periodo = ctk.CTkButton(
             marco_mes,
-            text=nombre_mes(self._anno, self._mes).capitalize(),
-            font=(FUENTE, 14, "bold"),
-            text_color=COLORES["texto_secundario"],
-            width=155,
+            text=f"📅  {self._texto_periodo}  ▾",
+            height=34,
+            corner_radius=8,
+            fg_color=COLORES["fondo_tarjeta"],
+            hover_color=COLORES["boton_lateral"],
+            border_width=1,
+            border_color=COLORES["acento"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 13, "bold"),
+            command=self._abrir_selector_periodo_shopify,
         )
-        self._etiqueta_mes.pack(side="left", padx=6)
+        self._boton_periodo.pack(side="left", padx=6)
 
         ctk.CTkButton(
             marco_mes,
             text="▶",
-            width=32,
-            height=30,
+            width=34,
+            height=34,
             corner_radius=8,
             fg_color=COLORES["boton_lateral"],
             hover_color=COLORES["hover_lateral"],
             text_color=COLORES["texto"],
             font=(FUENTE, 12, "bold"),
-            command=lambda: self._cambiar_mes(1),
+            command=lambda: self._desplazar_periodo(1),
         ).pack(side="left", padx=4)
 
         # Barra de filtro de moneda (COP + 4 últimas + Todas A-Z) y modo (Solo esta moneda vs Todo convertido)
@@ -129,7 +146,7 @@ class VistaResumen(ctk.CTkFrame):
 
         self._titulo_col_gastos = ctk.CTkLabel(
             col_gastos,
-            text="Gastos por categoría este mes",
+            text="Gastos por categoría en el periodo",
             font=(FUENTE, 16, "bold"),
             text_color=COLORES["texto"],
         )
@@ -214,20 +231,40 @@ class VistaResumen(ctk.CTkFrame):
             fill="both", expand=True, padx=16, pady=(0, 14)
         )
 
-    def _cambiar_mes(self, delta: int):
-        nuevo_mes = self._mes + delta
-        nuevo_anno = self._anno
-        if nuevo_mes < 1:
-            nuevo_mes = 12
-            nuevo_anno -= 1
-        elif nuevo_mes > 12:
-            nuevo_mes = 1
-            nuevo_anno += 1
-        self._mes = nuevo_mes
-        self._anno = nuevo_anno
-        self._etiqueta_mes.configure(
-            text=nombre_mes(self._anno, self._mes).capitalize()
+    # ------------------------------------------------------------------
+    # Navegación de Periodo y Popup estilo Shopify
+    # ------------------------------------------------------------------
+    def _abrir_selector_periodo_shopify(self):
+        DialogoPeriodoShopify(
+            self,
+            fecha_inicio=self._fecha_inicio,
+            fecha_fin=self._fecha_fin,
+            preset_inicial=self._preset_periodo,
+            al_aplicar=self._al_aplicar_periodo_shopify,
         )
+
+    def _al_aplicar_periodo_shopify(
+        self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
+    ):
+        self._fecha_inicio = fecha_ini
+        self._fecha_fin = fecha_fin
+        self._preset_periodo = preset
+        self._texto_periodo = etiqueta
+        self._anno = fecha_fin.year
+        self._mes = fecha_fin.month
+        self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+        self.refrescar()
+
+    def _desplazar_periodo(self, direccion: int):
+        ini, fin, etiqueta = desplazar_rango(
+            self._preset_periodo, self._fecha_inicio, self._fecha_fin, direccion
+        )
+        self._fecha_inicio = ini
+        self._fecha_fin = fin
+        self._texto_periodo = etiqueta
+        self._anno = fin.year
+        self._mes = fin.month
+        self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
         self.refrescar()
 
     def _al_cambiar_filtro_moneda(self, moneda: str, incluir_todas: bool):
@@ -250,15 +287,19 @@ class VistaResumen(ctk.CTkFrame):
                 text_color=COLORES["texto_secundario"],
             )
 
-        datos_mes = self._gestor.resumen_del_mes_en_moneda(
-            self._anno,
-            self._mes,
+        self._titulo_col_gastos.configure(
+            text=f"Gastos por categoría · {self._texto_periodo}"
+        )
+
+        datos_rango = self._gestor.resumen_del_rango_en_moneda(
+            fecha_inicio=self._fecha_inicio,
+            fecha_fin=self._fecha_fin,
             moneda_objetivo=moneda,
             incluir_todas_convertidas=incluir_todas,
         )
-        ingresos: Decimal = datos_mes["ingresos"]  # type: ignore[assignment]
-        gastos: Decimal = datos_mes["gastos"]  # type: ignore[assignment]
-        gastos_por_cat: dict = datos_mes["gastos_por_categoria"]  # type: ignore[assignment]
+        ingresos: Decimal = datos_rango["ingresos"]  # type: ignore[assignment]
+        gastos: Decimal = datos_rango["gastos"]  # type: ignore[assignment]
+        gastos_por_cat: dict = datos_rango["gastos_por_categoria"]  # type: ignore[assignment]
 
         self._etiqueta_total_gastos.configure(
             text=f"Total gastos ({moneda}): {formatear_valor(gastos, moneda)}"
@@ -289,7 +330,7 @@ class VistaResumen(ctk.CTkFrame):
             self._lienzo.create_text(
                 centro,
                 centro,
-                text="Sin gastos\neste mes",
+                text="No hubo gastos\neste periodo",
                 fill=COLORES["texto_secundario"],
                 font=(FUENTE, 12, "bold"),
                 justify="center",
@@ -339,7 +380,7 @@ class VistaResumen(ctk.CTkFrame):
         if total_gastos <= Decimal("0") or not gastos_por_categoria:
             ctk.CTkLabel(
                 self._marco_desglose,
-                text="No hay gastos registrados en este filtro.",
+                text="No hubo gastos este periodo.",
                 font=(FUENTE, 12),
                 text_color=COLORES["texto_secundario"],
             ).pack(pady=24)

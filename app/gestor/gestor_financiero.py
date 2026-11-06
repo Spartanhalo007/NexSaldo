@@ -255,7 +255,6 @@ class GestorFinanciero:
                 return self._tasas_memoria[par]
             if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
                 guardada = self._repositorio.obtener_ultima_cotizacion(simbolo_par)
-                # Ignorar si era una tasa pequeña truncada a 4 decimales (ej. 0.0003)
                 if guardada is not None and (
                     guardada.precio >= Decimal("0.01")
                     or guardada.precio.as_tuple().exponent <= -6
@@ -287,11 +286,6 @@ class GestorFinanciero:
         moneda_destino: str,
         tasa: Optional[Decimal] = None,
     ) -> Decimal:
-        """Convierte cualquier monto desde `moneda_origen` hacia `moneda_destino` con máxima precisión.
-        Si no se pasa `tasa` explícita y una de las monedas es más débil (ej. COP -> USD),
-        divide directamente por la tasa fuerte (ej. `monto / tasa(USD->COP)`), garantizando
-        que `convertir_entre_monedas(100000, 'COP', 'USD')` dé exactamente el mismo valor
-        que el diálogo de Añadir Gasto (ej. $31,05 USD en vez de $30,00 USD)."""
         origen = self._validar_moneda(moneda_origen)
         destino = self._validar_moneda(moneda_destino)
         monto_dec = Decimal(str(monto))
@@ -303,7 +297,6 @@ class GestorFinanciero:
                 raise ErrorValidacion("La tasa de cambio debe ser mayor que cero.")
             return (monto_dec * tasa).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # Caso directo exacto con COP <-> USD o cualquier par donde la tasa inversa es >= 1
         if origen == "COP" and destino != "COP":
             cot_inversa = self.obtener_tasa_cambio(destino, "COP")
             if cot_inversa is not None and cot_inversa.precio > Decimal("0"):
@@ -321,7 +314,6 @@ class GestorFinanciero:
         )
 
     def obtener_tasa_usd_cop(self, forzar_actualizacion: bool = False) -> Optional[Cotizacion]:
-        """Devuelve la cotización en tiempo real USD->COP o el último valor guardado localmente."""
         if not forzar_actualizacion:
             if self._cotizacion_usd_cop_memoria is not None:
                 return self._cotizacion_usd_cop_memoria
@@ -348,7 +340,6 @@ class GestorFinanciero:
             return None
 
     def convertir_usd_a_cop(self, monto_usd: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
-        """Convierte dólares (USD) a pesos colombianos (COP) redondeando a 2 decimales."""
         tasa_efectiva = tasa
         if tasa_efectiva is None:
             cot = self.obtener_tasa_usd_cop()
@@ -360,7 +351,6 @@ class GestorFinanciero:
         return (monto_usd * tasa_efectiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def convertir_cop_a_usd(self, monto_cop: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
-        """Convierte pesos colombianos (COP) a dólares (USD) redondeando a 2 decimales."""
         tasa_efectiva = tasa
         if tasa_efectiva is None:
             cot = self.obtener_tasa_usd_cop()
@@ -372,8 +362,53 @@ class GestorFinanciero:
         return (monto_cop / tasa_efectiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
-    # Resúmenes y Totales Unificados ("Solo esta divisa" vs "Todo convertido")
+    # Resúmenes y Totales Unificados por Mes o por Rango arbitrario
     # ------------------------------------------------------------------
+    def resumen_del_rango_en_moneda(
+        self,
+        fecha_inicio: Optional[date] = None,
+        fecha_fin: Optional[date] = None,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = False,
+    ) -> Dict[str, object]:
+        """Calcula {'ingresos': Decimal, 'gastos': Decimal, 'gastos_por_categoria': {cat: Decimal}}
+        para cualquier rango de fechas (Día, Semana, Mes, Trimestre/Quarter, Año, YTD o Personalizado)."""
+        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
+            raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
+
+        moneda_dest = self._validar_moneda(moneda_objetivo)
+        self.registrar_moneda_usada(moneda_dest)
+        movimientos = self.obtener_movimientos(
+            tipo=None, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin
+        )
+
+        total_ingresos = Decimal("0")
+        total_gastos = Decimal("0")
+        gastos_por_cat: Dict[str, Decimal] = {}
+
+        for mov in movimientos:
+            if not incluir_todas_convertidas and mov.moneda != moneda_dest:
+                continue
+
+            if mov.moneda == moneda_dest:
+                monto = mov.valor
+            else:
+                monto = self.convertir_entre_monedas(mov.valor, mov.moneda, moneda_dest)
+
+            if mov.tipo_movimiento == "INGRESO":
+                total_ingresos += monto
+            elif mov.tipo_movimiento == "GASTO":
+                total_gastos += monto
+                gastos_por_cat[mov.categoria] = (
+                    gastos_por_cat.get(mov.categoria, Decimal("0")) + monto
+                )
+
+        return {
+            "ingresos": total_ingresos,
+            "gastos": total_gastos,
+            "gastos_por_categoria": gastos_por_cat,
+        }
+
     def resumen_del_mes_en_moneda(
         self,
         anno: int,
