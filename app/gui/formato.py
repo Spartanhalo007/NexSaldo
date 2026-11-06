@@ -1,41 +1,58 @@
-"""Formato de visualización de importes (solo pantalla, no almacenamiento)."""
+"""Utilidades de formato para importes monetarios y fechas en NexSaldo."""
+
+from datetime import date, timedelta
+from decimal import Decimal
+
+from app.modelo.divisas import obtener_prefijo_divisa
+
+NOMBRES_MESES = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+]
+
+NOMBRES_DIAS = [
+    "lun.",
+    "mar.",
+    "mié.",
+    "jue.",
+    "vie.",
+    "sáb.",
+    "dom.",
+]
 
 
-def formatear_valor(valor, moneda):
-    """Da formato colombiano a un importe: $ 15.000,00 o US$ 1.234,50."""
-    texto = f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    prefijo = "$" if moneda == "COP" else "US$"
+def formatear_valor(valor, moneda: str = "COP") -> str:
+    """Da formato colombiano a un importe en cualquier divisa del mundo: $ 15.000,00, US$ 1.234,50, € 50,00."""
+    numero = Decimal(str(valor)) if not isinstance(valor, Decimal) else valor
+    texto = (
+        f"{numero:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    )
+    prefijo = obtener_prefijo_divisa(moneda)
     return f"{prefijo} {texto}"
 
 
-NOMBRES_MESES = [
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-]
+def nombre_mes(anno: int, mes: int) -> str:
+    if 1 <= mes <= 12:
+        return f"{NOMBRES_MESES[mes - 1]} de {anno}"
+    return f"{mes}/{anno}"
 
 
-def nombre_mes(anno, mes):
-    """Devuelve el nombre legible de un mes, ej.: 'noviembre de 2026'."""
-    return f"{NOMBRES_MESES[mes - 1]} de {anno}"
-
-
-NOMBRES_DIAS = [
-    "lunes", "martes", "miércoles", "jueves",
-    "viernes", "sábado", "domingo",
-]
-
-
-def fecha_legible(fecha, hoy=None):
-    """Formatea una fecha para el usuario.
-
-    Ejemplos: 'hoy, 3 de noviembre de 2026 (martes)' o
-    '3 de noviembre de 2026 (domingo)'. El día de la semana entre paréntesis.
-    """
-    from datetime import date as _date
-
-    if hoy is None:
-        hoy = _date.today()
-    dia_semana = NOMBRES_DIAS[fecha.weekday()]
-    texto = f"{fecha.day} de {nombre_mes(fecha.year, fecha.month)}"
-    prefijo = "hoy, " if fecha == hoy else ""
-    return f"{prefijo}{texto} ({dia_semana})"
+def fecha_legible(fecha: date, hoy: date | None = None) -> str:
+    referencia = hoy or date.today()
+    if fecha == referencia:
+        return "Hoy"
+    if fecha == referencia - timedelta(days=1):
+        return "Ayer"
+    dia_sem = NOMBRES_DIAS[fecha.weekday()]
+    mes_abrev = NOMBRES_MESES[fecha.month - 1][:3]
+    return f"{dia_sem}, {fecha.day} {mes_abrev}."

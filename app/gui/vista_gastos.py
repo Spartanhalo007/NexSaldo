@@ -1,4 +1,5 @@
-"""Vista principal del Módulo de Gastos para NexSaldo."""
+"""Vista principal del Módulo de Gastos para NexSaldo con filtro de todas las divisas del mundo
+(COP + 4 últimas usadas + lista A-Z) y modo 'Solo esta moneda' vs 'Todo convertido'."""
 
 from datetime import date, timedelta
 from decimal import Decimal
@@ -13,6 +14,7 @@ from app.gui.dialogo_gasto import DialogoGasto
 from app.gui.estilos import COLORES, COLORES_GRAFICA, FUENTE
 from app.gui.formato import fecha_legible, formatear_valor
 from app.gui.iconos import icono_ctk
+from app.gui.selector_moneda import BarraFiltroMoneda
 
 TAMANO_DONA = 240
 GROSOR_DONA = 34
@@ -21,6 +23,7 @@ OPCIONES_PERIODO = ("Día", "Semana", "Mes", "Año", "Periodo")
 
 class VistaGastos(ctk.CTkFrame):
     """Muestra la gráfica circular de gastos por periodo (Día, Semana, Mes, Año, Periodo),
+    el filtro mundial de divisas ('Solo esta moneda' o 'Todo convertido'),
     el botón amarillo 'Añadir gasto', el desglose por categorías y la lista de gastos."""
 
     def __init__(self, master, gestor: GestorFinanciero, **kwargs):
@@ -28,6 +31,7 @@ class VistaGastos(ctk.CTkFrame):
         self._gestor = gestor
         self._filtro_actual = "Mes"
         self._moneda_grafica = "COP"  # COP siempre por defecto
+        self._incluir_todas_convertidas = False
         self._fecha_desde: Optional[date] = None
         self._fecha_hasta: Optional[date] = None
 
@@ -35,16 +39,14 @@ class VistaGastos(ctk.CTkFrame):
         self._refrescar_vista()
 
     def _construir_interfaz(self):
-        contenedor = ctk.CTkScrollableFrame(
-            self, fg_color="transparent"
-        )
+        contenedor = ctk.CTkScrollableFrame(self, fg_color="transparent")
         contenedor.pack(fill="both", expand=True, padx=24, pady=18)
 
         # ==================================================================
         # 1. CABECERA Y BOTÓN AMARILLO "Añadir gasto"
         # ==================================================================
         fila_superior = ctk.CTkFrame(contenedor, fg_color="transparent")
-        fila_superior.pack(fill="x", pady=(0, 14))
+        fila_superior.pack(fill="x", pady=(0, 10))
 
         ctk.CTkLabel(
             fila_superior,
@@ -66,22 +68,23 @@ class VistaGastos(ctk.CTkFrame):
             command=self._abrir_dialogo_anadir_gasto,
         ).pack(side="right")
 
-        # Selector rápido de divisa para la gráfica circular (COP por defecto / USD)
-        self._var_moneda_vista = ctk.StringVar(value="COP")
-        self._selector_moneda_vista = ctk.CTkSegmentedButton(
-            fila_superior,
-            values=["COP", "USD"],
-            variable=self._var_moneda_vista,
-            selected_color=COLORES["acento"],
-            selected_hover_color=COLORES["acento_hover"],
-            unselected_color=COLORES["boton_lateral"],
-            unselected_hover_color=COLORES["hover_lateral"],
-            text_color=COLORES["texto"],
-            font=(FUENTE, 12, "bold"),
-            height=36,
-            command=self._al_cambiar_moneda_vista,
+        # Barra de Moneda Mundial (COP + 4 últimas + Todas A-Z) y Modo (Solo esta moneda / Todo convertido)
+        marco_moneda = ctk.CTkFrame(
+            contenedor, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
         )
-        self._selector_moneda_vista.pack(side="right", padx=(0, 14))
+        marco_moneda.pack(fill="x", pady=(0, 12))
+
+        fila_barra_moneda = ctk.CTkFrame(marco_moneda, fg_color="transparent")
+        fila_barra_moneda.pack(fill="x", padx=16, pady=10)
+
+        self._barra_moneda = BarraFiltroMoneda(
+            fila_barra_moneda,
+            gestor=self._gestor,
+            al_cambiar=self._al_cambiar_filtro_moneda,
+            moneda_inicial="COP",
+            mostrar_modo=True,
+        )
+        self._barra_moneda.pack(side="left")
 
         # ==================================================================
         # 2. FILTROS DE PERIODO: Día, Semana, Mes, Año, Periodo (Calendario)
@@ -115,7 +118,6 @@ class VistaGastos(ctk.CTkFrame):
                 command=self._al_cambiar_filtro,
             ).pack(side="left", padx=10)
 
-        # Sub-panel de calendario customizado (igual que en Cuentas al presionar "Periodo")
         self._marco_periodo = ctk.CTkFrame(marco_filtros, fg_color="transparent")
 
         ctk.CTkLabel(
@@ -168,7 +170,6 @@ class VistaGastos(ctk.CTkFrame):
         fila_central.grid_columnconfigure(0, weight=1)
         fila_central.grid_columnconfigure(1, weight=1)
 
-        # Tarjeta izquierda: Gráfica circular (Dona)
         tarjeta_dona = ctk.CTkFrame(
             fila_central, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
         )
@@ -191,7 +192,6 @@ class VistaGastos(ctk.CTkFrame):
         )
         self._lienzo.pack(pady=(4, 14))
 
-        # Tarjeta derecha: Distribución por categorías en el periodo
         tarjeta_desglose = ctk.CTkFrame(
             fila_central, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
         )
@@ -219,7 +219,7 @@ class VistaGastos(ctk.CTkFrame):
 
         ctk.CTkLabel(
             tarjeta_historial,
-            text=" Movimientos de gastos registrados en este periodo",
+            text="Movimientos de gastos registrados en este periodo",
             font=(FUENTE, 15, "bold"),
             text_color=COLORES["texto"],
         ).pack(anchor="w", padx=16, pady=(14, 8))
@@ -230,10 +230,11 @@ class VistaGastos(ctk.CTkFrame):
         self._contenedor_historial.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
     # ------------------------------------------------------------------
-    # Manejo de Periodo y Calendario (idéntico al módulo de Cuentas)
+    # Manejo de Moneda, Modo y Periodo
     # ------------------------------------------------------------------
-    def _al_cambiar_moneda_vista(self, nueva_moneda: str):
+    def _al_cambiar_filtro_moneda(self, nueva_moneda: str, incluir_todas: bool):
         self._moneda_grafica = nueva_moneda
+        self._incluir_todas_convertidas = incluir_todas
         self._refrescar_vista()
 
     def _al_cambiar_filtro(self):
@@ -314,10 +315,18 @@ class VistaGastos(ctk.CTkFrame):
     # ------------------------------------------------------------------
     def _refrescar_vista(self):
         fecha_ini, fecha_fin, etiqueta_rango = self._rango_del_filtro()
-        self._titulo_rango.configure(text=f"{etiqueta_rango} ({self._moneda_grafica})")
+        sufijo_modo = (
+            f"Todo convertido a {self._moneda_grafica}"
+            if self._incluir_todas_convertidas
+            else f"Solo {self._moneda_grafica}"
+        )
+        self._titulo_rango.configure(text=f"{etiqueta_rango} ({sufijo_modo})")
 
         resumen_global = self._gestor.resumen_gastos_periodo(
-            fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+            fecha_inicio=fecha_ini,
+            fecha_fin=fecha_fin,
+            moneda_objetivo=self._moneda_grafica,
+            incluir_todas_convertidas=self._incluir_todas_convertidas,
         )
         datos_moneda = resumen_global.get(
             self._moneda_grafica,
@@ -345,7 +354,6 @@ class VistaGastos(ctk.CTkFrame):
         centro = TAMANO_DONA // 2
 
         if total <= Decimal("0") or not por_categoria:
-            # Estado sin gastos: anillo neutro y texto "No hubo gastos este periodo"
             self._lienzo.create_oval(
                 x0,
                 y0,
@@ -399,7 +407,6 @@ class VistaGastos(ctk.CTkFrame):
                 )
                 angulo_inicio += extension
 
-        # Texto central indicando cuánto se gastó dentro del gráfico circular
         monto_formateado = formatear_valor(total, self._moneda_grafica)
         self._lienzo.create_text(
             centro,
@@ -491,9 +498,16 @@ class VistaGastos(ctk.CTkFrame):
         for hijo in self._contenedor_historial.winfo_children():
             hijo.destroy()
 
-        movimientos = self._gestor.obtener_movimientos(
+        todos_movimientos = self._gestor.obtener_movimientos(
             "GASTO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
         )
+        if self._incluir_todas_convertidas:
+            movimientos = todos_movimientos
+        else:
+            movimientos = [
+                m for m in todos_movimientos if m.moneda == self._moneda_grafica
+            ]
+
         if not movimientos:
             ctk.CTkLabel(
                 self._contenedor_historial,
@@ -536,7 +550,7 @@ class VistaGastos(ctk.CTkFrame):
             col_info = ctk.CTkFrame(item, fg_color="transparent")
             col_info.pack(side="left", fill="x", expand=True, pady=8)
 
-            titulo_linea = mov.categoria
+            titulo_linea = f"{mov.categoria} [{mov.moneda}]"
             if mov.cuenta_id and mov.cuenta_id in mapa_cuentas:
                 titulo_linea += f"  •  Cuenta: {mapa_cuentas[mov.cuenta_id]}"
             if mov.es_programado:
@@ -578,10 +592,21 @@ class VistaGastos(ctk.CTkFrame):
             )
             btn_eliminar.pack(side="right", padx=(6, 12))
 
+            if self._incluir_todas_convertidas and mov.moneda != self._moneda_grafica:
+                try:
+                    val_conv = self._gestor.convertir_entre_monedas(
+                        mov.valor, mov.moneda, self._moneda_grafica
+                    )
+                    texto_monto = f"- {formatear_valor(val_conv, self._moneda_grafica)} ({formatear_valor(mov.valor, mov.moneda)})"
+                except Exception:
+                    texto_monto = f"- {formatear_valor(mov.valor, mov.moneda)}"
+            else:
+                texto_monto = f"- {formatear_valor(mov.valor, mov.moneda)}"
+
             ctk.CTkLabel(
                 item,
-                text=f"- {formatear_valor(mov.valor, mov.moneda)}",
-                font=(FUENTE, 14, "bold"),
+                text=texto_monto,
+                font=(FUENTE, 13, "bold"),
                 text_color=COLORES["error"],
             ).pack(side="right", padx=8)
 
@@ -593,9 +618,8 @@ class VistaGastos(ctk.CTkFrame):
         )
 
     def _al_guardar_nuevo_gasto(self, movimiento):
-        if movimiento.moneda in ("COP", "USD"):
-            self._moneda_grafica = movimiento.moneda
-            self._var_moneda_vista.set(movimiento.moneda)
+        self._moneda_grafica = movimiento.moneda
+        self._barra_moneda.establecer_moneda(movimiento.moneda)
         self._refrescar_vista()
 
     def _confirmar_eliminar(self, id_movimiento: Optional[int]):

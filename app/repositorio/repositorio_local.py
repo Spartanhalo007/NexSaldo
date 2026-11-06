@@ -63,7 +63,7 @@ class RepositorioLocal:
         return filas
 
     # ------------------------------------------------------------------
-    # Categorías (compatible con versión original + categorías ricas)
+    # Categorías
     # ------------------------------------------------------------------
     def obtener_categorias(self) -> List[str]:
         filas = self.ejecutar_consulta("SELECT nombre FROM categoria ORDER BY nombre")
@@ -415,7 +415,7 @@ class RepositorioLocal:
         return {f[0]: Decimal(str(f[1])) for f in filas}
 
     # ------------------------------------------------------------------
-    # Transferencias y Colores Recientes
+    # Transferencias, Colores Recientes y Divisas Recientes
     # ------------------------------------------------------------------
     def insertar_transferencia(self, transferencia: Transferencia) -> Transferencia:
         conexion = self.conectar()
@@ -500,6 +500,34 @@ class RepositorioLocal:
             (maximo,),
         )
         return [f[0] for f in filas]
+
+    def registrar_moneda_reciente(self, codigo: str):
+        codigo_limpio = codigo.strip().upper()
+        if codigo_limpio == "COP":
+            return
+        conexion = self.conectar()
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO moneda_reciente (codigo, fecha_uso)
+                VALUES (%s, CURRENT_TIMESTAMP)
+                ON CONFLICT (codigo) DO UPDATE SET fecha_uso = CURRENT_TIMESTAMP
+                """,
+                (codigo_limpio,),
+            )
+        conexion.commit()
+
+    def obtener_monedas_recientes(self, maximo: int = 4) -> List[str]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT codigo FROM moneda_reciente
+            WHERE codigo <> 'COP'
+            ORDER BY fecha_uso DESC
+            LIMIT %s
+            """,
+            (maximo,),
+        )
+        return [f[0].strip().upper() for f in filas]
 
     # ------------------------------------------------------------------
     # Cotizaciones y tasas de cambio en tiempo real (Yahoo Finance)

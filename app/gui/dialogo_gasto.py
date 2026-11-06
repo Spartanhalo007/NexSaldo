@@ -1,4 +1,5 @@
-"""Diálogo/Formulario completo para Añadir Gasto en NexSaldo con conversión en tiempo real USD <-> COP."""
+"""Diálogo/Formulario completo para Añadir Gasto en NexSaldo con soporte de todas las divisas del mundo
+(COP + 4 últimas usadas + lista A-Z) y conversión automática en tiempo real hacia/desde COP."""
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -19,9 +20,15 @@ from app.gui.dialogo_etiqueta import DialogoEtiquetas
 from app.gui.estilos import COLORES, FUENTE
 from app.gui.formato import formatear_valor
 from app.gui.iconos import GRIS, icono_ctk
+from app.gui.selector_moneda import DialogoSelectorDivisa
 from app.modelo.categoria import Categoria
 from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
+from app.modelo.divisas import (
+    etiqueta_divisa,
+    extraer_codigo_divisa,
+    obtener_prefijo_divisa,
+)
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 
 RUTA_ADJUNTOS = Path(__file__).resolve().parents[2] / "adjuntos"
@@ -38,8 +45,8 @@ def _decimal_a_texto_moneda(valor: Decimal) -> str:
 
 
 class DialogoGasto(ctk.CTkToplevel):
-    """Formulario para añadir un gasto con monto, divisa (COP por defecto) y conversión
-    bidireccional automática en tiempo real USD <-> COP mediante Yahoo Finance (yfinance)."""
+    """Formulario para añadir un gasto con monto, selector mundial de divisa (COP por defecto)
+    y conversión bidireccional automática en tiempo real Divisa <-> COP mediante Yahoo Finance."""
 
     def __init__(
         self,
@@ -64,7 +71,7 @@ class DialogoGasto(ctk.CTkToplevel):
         self._ruta_imagen: Optional[str] = None
 
         self.title("Añadir gasto")
-        self.geometry("680x840")
+        self.geometry("690x840")
         self.resizable(False, True)
         self.configure(fg_color=COLORES["fondo_lateral"])
         self.transient(master)
@@ -74,7 +81,7 @@ class DialogoGasto(ctk.CTkToplevel):
 
     def _construir_interfaz(self):
         cuerpo = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", width=640, height=790
+            self, fg_color="transparent", width=650, height=790
         )
         cuerpo.pack(fill="both", expand=True, padx=16, pady=14)
 
@@ -86,7 +93,7 @@ class DialogoGasto(ctk.CTkToplevel):
         ).pack(anchor="w", pady=(0, 10))
 
         # ==================================================================
-        # 1. CANTIDAD GASTADA + DIVISA (COP default / USD con conversión) + CALCULADORA
+        # 1. CANTIDAD GASTADA + DIVISA MUNDIAL (COP default) + CALCULADORA
         # ==================================================================
         marco_monto = ctk.CTkFrame(
             cuerpo, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
@@ -95,7 +102,7 @@ class DialogoGasto(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             marco_monto,
-            text="Cantidad gastada y divisa",
+            text="Cantidad gastada y divisa (COP + 4 últimas usadas o cualquier divisa del mundo)",
             font=(FUENTE, 13, "bold"),
             text_color=COLORES["texto"],
         ).pack(anchor="w", padx=16, pady=(12, 6))
@@ -114,46 +121,64 @@ class DialogoGasto(ctk.CTkToplevel):
             text="COP $",
             font=(FUENTE, 13, "bold"),
             text_color=COLORES["acento"],
-            width=52,
+            width=58,
         )
         self._etiqueta_campo_principal.pack(side="left", padx=(0, 4))
 
         self._campo_valor = CampoMoneda(
-            fila_input_divisa, width=180, height=40, corner_radius=8
+            fila_input_divisa, width=145, height=40, corner_radius=8
         )
-        self._campo_valor.pack(side="left", padx=(0, 8))
+        self._campo_valor.pack(side="left", padx=(0, 6))
         self._campo_valor.bind("<KeyRelease>", self._al_escribir_campo_principal, add="+")
         self._campo_valor.bind("<FocusIn>", lambda _e: self._apuntar_calculadora(self._campo_valor), add="+")
 
-        self._var_moneda = ctk.StringVar(value="COP")
-        self._selector_divisa = ctk.CTkSegmentedButton(
+        opciones_divisa = self._gestor.obtener_opciones_selector_divisas()
+        self._combo_divisa = ctk.CTkComboBox(
             fila_input_divisa,
-            values=["COP", "USD"],
-            variable=self._var_moneda,
-            selected_color=COLORES["acento"],
-            selected_hover_color=COLORES["acento_hover"],
-            unselected_color=COLORES["boton_lateral"],
-            unselected_hover_color=COLORES["hover_lateral"],
-            text_color=COLORES["texto"],
-            font=(FUENTE, 13, "bold"),
+            values=opciones_divisa,
+            width=145,
             height=40,
-            command=self._al_cambiar_divisa,
+            corner_radius=8,
+            fg_color=COLORES["campo_fondo"],
+            text_color=COLORES["campo_texto"],
+            button_color=COLORES["acento"],
+            button_hover_color=COLORES["acento_hover"],
+            dropdown_fg_color=COLORES["fondo_lateral"],
+            dropdown_text_color=COLORES["texto"],
+            dropdown_hover_color=COLORES["fondo_tarjeta"],
+            font=(FUENTE, 12, "bold"),
+            command=self._al_cambiar_combo_divisa,
         )
-        self._selector_divisa.pack(side="left")
+        self._combo_divisa.set(etiqueta_divisa("COP"))
+        self._combo_divisa.pack(side="left", padx=(0, 4))
 
-        # --- Panel de conversión bidireccional en tiempo real (al seleccionar USD) ---
-        self._marco_conversion_usd = ctk.CTkFrame(
+        ctk.CTkButton(
+            fila_input_divisa,
+            text="🌍",
+            width=38,
+            height=40,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 14),
+            command=self._abrir_selector_todas_divisas,
+        ).pack(side="left")
+
+        # --- Panel de conversión bidireccional en tiempo real (al seleccionar cualquier divisa distinta de COP) ---
+        self._marco_conversion_extranjera = ctk.CTkFrame(
             col_izquierda, fg_color=COLORES["boton_lateral"], corner_radius=10
         )
 
-        ctk.CTkLabel(
-            self._marco_conversion_usd,
+        self._etiqueta_instruccion_conv = ctk.CTkLabel(
+            self._marco_conversion_extranjera,
             text="Equivalente en Pesos Colombianos (escribe en USD o en COP):",
             font=(FUENTE, 11, "bold"),
             text_color=COLORES["texto"],
-        ).pack(anchor="w", padx=10, pady=(8, 4))
+        )
+        self._etiqueta_instruccion_conv.pack(anchor="w", padx=10, pady=(8, 4))
 
-        fila_equiv_cop = ctk.CTkFrame(self._marco_conversion_usd, fg_color="transparent")
+        fila_equiv_cop = ctk.CTkFrame(self._marco_conversion_extranjera, fg_color="transparent")
         fila_equiv_cop.pack(fill="x", padx=10, pady=(0, 6))
 
         ctk.CTkLabel(
@@ -161,7 +186,7 @@ class DialogoGasto(ctk.CTkToplevel):
             text="COP $",
             font=(FUENTE, 13, "bold"),
             text_color=COLORES["acento"],
-            width=52,
+            width=58,
         ).pack(side="left", padx=(0, 4))
 
         self._campo_valor_cop_equiv = CampoMoneda(
@@ -191,7 +216,7 @@ class DialogoGasto(ctk.CTkToplevel):
         ).pack(side="left")
 
         self._etiqueta_tasa_yahoo = ctk.CTkLabel(
-            self._marco_conversion_usd,
+            self._marco_conversion_extranjera,
             text="Consultando cotización en tiempo real en Yahoo Finance...",
             font=(FUENTE, 11),
             text_color=COLORES["texto_secundario"],
@@ -468,20 +493,63 @@ class DialogoGasto(ctk.CTkToplevel):
         ).pack(side="right")
 
     # ------------------------------------------------------------------
-    # Lógica de Divisa, Conversión Bidireccional USD <-> COP y Cuentas
+    # Lógica de Divisa Mundial, Conversión Bidireccional <-> COP y Cuentas
     # ------------------------------------------------------------------
     def _apuntar_calculadora(self, campo_objetivo: CampoMoneda):
         if hasattr(self, "_calculadora") and hasattr(self._calculadora, "_campo_destino"):
             self._calculadora._campo_destino = campo_objetivo
 
+    def _abrir_selector_todas_divisas(self):
+        DialogoSelectorDivisa(
+            self,
+            gestor=self._gestor,
+            moneda_actual=self._moneda_elegida,
+            al_seleccionar=self._aplicar_cambio_divisa,
+        )
+
+    def _al_cambiar_combo_divisa(self, opcion_texto: str):
+        codigo = extraer_codigo_divisa(opcion_texto)
+        self._aplicar_cambio_divisa(codigo)
+
+    def _aplicar_cambio_divisa(self, nueva_moneda: str):
+        self._moneda_elegida = nueva_moneda.strip().upper()
+        self._gestor.registrar_moneda_usada(self._moneda_elegida)
+        opciones = self._gestor.obtener_opciones_selector_divisas()
+        self._combo_divisa.configure(values=opciones)
+        self._combo_divisa.set(etiqueta_divisa(self._moneda_elegida))
+
+        prefijo = obtener_prefijo_divisa(self._moneda_elegida)
+        self._etiqueta_campo_principal.configure(text=f"{self._moneda_elegida} {prefijo}")
+
+        if self._moneda_elegida != "COP":
+            self._etiqueta_instruccion_conv.configure(
+                text=f"Equivalente en Pesos Colombianos (escribe en {self._moneda_elegida} o en COP):"
+            )
+            self._marco_conversion_extranjera.pack(
+                fill="x", pady=(0, 8), before=self._contenedor_selector_cuenta
+            )
+            self._cargar_tasa_yahoo(forzar=False)
+            self._etiqueta_info_cuenta.configure(
+                text=f"Puedes digitar en {self._moneda_elegida} o en COP; el otro campo se convierte automáticamente."
+            )
+        else:
+            self._marco_conversion_extranjera.pack_forget()
+            self._apuntar_calculadora(self._campo_valor)
+            self._etiqueta_info_cuenta.configure(
+                text="Moneda por defecto: Peso colombiano (COP)"
+            )
+        self._cargar_cuentas_disponibles()
+
     def _cargar_tasa_yahoo(self, forzar: bool = False):
-        self._cotizacion_trm = self._gestor.obtener_tasa_usd_cop(
-            forzar_actualizacion=forzar
+        if self._moneda_elegida == "COP":
+            return
+        self._cotizacion_trm = self._gestor.obtener_tasa_cambio(
+            self._moneda_elegida, "COP", forzar_actualizacion=forzar
         )
         if self._cotizacion_trm is not None:
             tasa_fmt = formatear_valor(self._cotizacion_trm.precio, "COP")
             self._etiqueta_tasa_yahoo.configure(
-                text=f"1 USD = {tasa_fmt}  •  Yahoo Finance en tiempo real ({self._cotizacion_trm.fecha.isoformat()})",
+                text=f"1 {self._moneda_elegida} = {tasa_fmt}  •  Yahoo Finance en tiempo real ({self._cotizacion_trm.fecha.isoformat()})",
                 text_color=COLORES["exito"],
             )
             self._al_escribir_campo_principal()
@@ -492,24 +560,27 @@ class DialogoGasto(ctk.CTkToplevel):
             )
 
     def _al_escribir_campo_principal(self, _evento=None):
-        """Si está en USD y el usuario escribe dólares, calcula automáticamente los COP equivalentes."""
-        if self._moneda_elegida != "USD" or self._sincronizando_conversion:
+        """Si está en una divisa extranjera y el usuario escribe en ella, calcula automáticamente los COP equivalentes."""
+        if self._moneda_elegida == "COP" or self._sincronizando_conversion:
             return
         if self._cotizacion_trm is None:
             return
 
-        texto_usd = self._campo_valor.obtener_valor().strip()
+        texto_ext = self._campo_valor.obtener_valor().strip()
         self._sincronizando_conversion = True
         try:
-            if not texto_usd:
+            if not texto_ext:
                 self._campo_valor_cop_equiv.delete(0, "end")
                 return
-            monto_usd = Decimal(texto_usd.replace(",", "."))
-            if monto_usd <= Decimal("0"):
+            monto_ext = Decimal(texto_ext.replace(",", "."))
+            if monto_ext <= Decimal("0"):
                 self._campo_valor_cop_equiv.delete(0, "end")
                 return
-            monto_cop = self._gestor.convertir_usd_a_cop(
-                monto_usd, tasa=self._cotizacion_trm.precio
+            monto_cop = self._gestor.convertir_entre_monedas(
+                monto_ext,
+                self._moneda_elegida,
+                "COP",
+                tasa=self._cotizacion_trm.precio,
             )
             self._campo_valor_cop_equiv.delete(0, "end")
             self._campo_valor_cop_equiv.insert(0, _decimal_a_texto_moneda(monto_cop))
@@ -519,10 +590,10 @@ class DialogoGasto(ctk.CTkToplevel):
             self._sincronizando_conversion = False
 
     def _al_escribir_campo_cop_equivalente(self, _evento=None):
-        """Si el usuario escribe lo que pagó en COP, calcula automáticamente los USD equivalentes."""
-        if self._moneda_elegida != "USD" or self._sincronizando_conversion:
+        """Si el usuario escribe lo que pagó en COP, calcula exactamente el mismo valor que el resto de la app."""
+        if self._moneda_elegida == "COP" or self._sincronizando_conversion:
             return
-        if self._cotizacion_trm is None:
+        if self._cotizacion_trm is None or self._cotizacion_trm.precio <= Decimal("0"):
             return
 
         texto_cop = self._campo_valor_cop_equiv.obtener_valor().strip()
@@ -535,11 +606,11 @@ class DialogoGasto(ctk.CTkToplevel):
             if monto_cop <= Decimal("0"):
                 self._campo_valor.delete(0, "end")
                 return
-            monto_usd = self._gestor.convertir_cop_a_usd(
-                monto_cop, tasa=self._cotizacion_trm.precio
+            monto_ext = self._gestor.convertir_entre_monedas(
+                monto_cop, "COP", self._moneda_elegida
             )
             self._campo_valor.delete(0, "end")
-            self._campo_valor.insert(0, _decimal_a_texto_moneda(monto_usd))
+            self._campo_valor.insert(0, _decimal_a_texto_moneda(monto_ext))
         except (InvalidOperation, ErrorValidacion):
             pass
         finally:
@@ -566,26 +637,6 @@ class DialogoGasto(ctk.CTkToplevel):
         else:
             self._var_cuenta.set("Sin cuenta asociada")
             self._cuenta_elegida_id = None
-
-    def _al_cambiar_divisa(self, nueva_moneda: str):
-        self._moneda_elegida = nueva_moneda
-        if nueva_moneda == "USD":
-            self._etiqueta_campo_principal.configure(text="USD $")
-            self._marco_conversion_usd.pack(
-                fill="x", pady=(0, 8), before=self._contenedor_selector_cuenta
-            )
-            self._cargar_tasa_yahoo(forzar=False)
-            self._etiqueta_info_cuenta.configure(
-                text="Puedes digitar en USD o en COP; el otro campo se convierte automáticamente."
-            )
-        else:
-            self._etiqueta_campo_principal.configure(text="COP $")
-            self._marco_conversion_usd.pack_forget()
-            self._apuntar_calculadora(self._campo_valor)
-            self._etiqueta_info_cuenta.configure(
-                text="Moneda por defecto: Peso colombiano (COP)"
-            )
-        self._cargar_cuentas_disponibles()
 
     def _al_seleccionar_cuenta(self, seleccion: str):
         cuenta = self._mapa_cuentas.get(seleccion)
@@ -850,10 +901,10 @@ class DialogoGasto(ctk.CTkToplevel):
         if self._cuenta_elegida_id is not None:
             cuenta_obj = self._gestor.obtener_cuenta(self._cuenta_elegida_id)
 
-        if self._moneda_elegida == "USD" and self._cotizacion_trm is not None:
+        if self._moneda_elegida != "COP" and self._cotizacion_trm is not None:
             valor_cop_equiv = self._campo_valor_cop_equiv.obtener_valor().strip()
             if cuenta_obj is not None and cuenta_obj.moneda == "COP" and valor_cop_equiv:
-                nota_conv = f"(USD ${valor_limpio} a tasa {self._cotizacion_trm.precio})"
+                nota_conv = f"({self._moneda_elegida} {valor_limpio} a tasa {self._cotizacion_trm.precio})"
                 comentario = f"{comentario} {nota_conv}".strip() if comentario else nota_conv
                 valor_limpio = valor_cop_equiv
                 moneda_guardar = "COP"

@@ -14,7 +14,7 @@ class ErrorConsultaBursatil(Exception):
 
 
 class ServicioBursatil:
-    """Consulta el precio en tiempo real (o el más reciente del mercado) en Yahoo Finance."""
+    """Consulta el precio y tasas de cambio en tiempo real en Yahoo Finance con alta precisión."""
 
     def __init__(self, proveedor_yf=None):
         self._yf = proveedor_yf
@@ -36,7 +36,6 @@ class ServicioBursatil:
         2) serie intradía de 1 minuto (period='1d', interval='1m')
         3) serie reciente de respaldo (period='5d') cuando el mercado no tiene sesión activa
         """
-        # 1. Cotización directa en tiempo real via fast_info
         try:
             fast_info = getattr(ticker, "fast_info", None)
             if fast_info is not None:
@@ -55,7 +54,6 @@ class ServicioBursatil:
         except Exception:
             pass
 
-        # 2. Serie intradía de 1 minuto (sesión en vivo)
         try:
             intradia = ticker.history(period="1d", interval="1m")
             if intradia is not None and not intradia.empty and "Close" in intradia:
@@ -69,7 +67,6 @@ class ServicioBursatil:
         except Exception:
             pass
 
-        # 3. Respaldo cuando la bolsa está fuera de horario
         try:
             historial = ticker.history(period="5d")
         except Exception as error:
@@ -99,9 +96,9 @@ class ServicioBursatil:
         return ultimo_valor, fecha_cot
 
     def consultar_precio_actual(
-        self, simbolo: str, moneda_esperada: str = "USD"
+        self, simbolo: str, moneda_esperada: str = "USD", decimales: str = "0.01"
     ) -> Cotizacion:
-        """Obtiene el precio en tiempo real para un símbolo (ej. 'USDCOP=X', 'VOO', 'AAPL')."""
+        """Obtiene el precio en tiempo real para un símbolo (ej. 'USDCOP=X', 'EURCOP=X', 'VOO')."""
         if not isinstance(simbolo, str) or not simbolo.strip():
             raise ErrorConsultaBursatil("El símbolo bursátil es obligatorio.")
         simbolo_limpio = simbolo.strip().upper()
@@ -119,7 +116,7 @@ class ServicioBursatil:
         )
 
         precio_decimal = Decimal(str(valor_actual)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+            Decimal(decimales), rounding=ROUND_HALF_UP
         )
 
         return Cotizacion(
@@ -130,6 +127,84 @@ class ServicioBursatil:
             moneda=moneda_esperada.strip().upper(),
             fuente="Yahoo Finance (Tiempo real)",
         )
+
+    def consultar_tasa_cambio(self, moneda_origen: str, moneda_destino: str) -> Cotizacion:
+        """Obtiene la tasa en tiempo real entre cualquier par de divisas del mundo con 8 decimales
+        de precisión. Si el par directo es menor a 1 (ej. COP->USD = 0.00031), prioriza calcular
+        1 / tasa_inversa (ej. 1 / USDCOP=X) para que coincida centavo a centavo con Añadir Gasto."""
+        origen = moneda_origen.strip().upper()
+        destino = moneda_destino.strip().upper()
+        if origen == destino:
+            return Cotizacion(
+                id=None,
+                simbolo=f"{origen}{destino}=X",
+                fecha=date.today(),
+                precio=Decimal("1.00000000"),
+                moneda=destino,
+                fuente="Paridad 1:1",
+            )
+
+        simbolo_directo = f"{origen}{destino}=X"
+        simbolo_inverso = f"{destino}{origen}=X"
+
+        # Si una de las divisas es más fuerte (como convertir de COP a USD/EUR),
+        # consultar primero el par mayor >= 1 (ej. USDCOP=X = 3220.19) y dividir 1 / tasa
+        # evita el redondeo de tickers pequeños en Yahoo Finance.
+        try:
+            cot_dir = self.consultar_precio_actual(
+                simbolo_directo, moneda_esperada=destino, decimales="0.00000001"
+            )
+            if cot_dir.precio >= Decimal("1"):
+                return cot_dir
+        except ErrorConsultaBursatil:
+            cot_dir = None
+
+        # Intentar par inverso (ej. USDCOP=X cuando se pide COP -> USD) con 8 decimales
+        try:
+            cot_inv = self.consultar_precio_actual(
+                simbolo_inverso, moneda_esperada=origen, decimales="0.00000001"
+            )
+            if cot_inv.precio > Decimal("0"):
+                tasa_exacta = (Decimal("1") / cot_inv.precio).quantize(
+                    Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                )
+                return Cotizacion(
+                    id=None,
+                    simbolo=simbolo_directo,
+                    fecha=cot_inv.fecha,
+                    precio=tasa_exacta,
+                    moneda=destino,
+                    fuente="Yahoo Finance (Tiempo real)",
+                )
+        except ErrorConsultaBursatil:
+            pass
+
+        if cot_dir is not None and cot_dir.precio > Decimal("0"):
+            return cot_dir
+
+        # Triangulación vía USD con 8 decimales si ninguna de las dos es USD
+        if origen != "USD" and destino != "USD":
+            cot_origen_usd = self.consultar_tasa_cambio(origen, "USD")
+            cot_usd_destino = self.consultar_tasa_cambio("USD", destino)
+            tasa_cruzada = (cot_origen_usd.precio * cot_usd_destino.precio).quantize(
+                Decimal("0.00000001"), rounding=ROUND_HALF_UP
+            )
+            return Cotizacion(
+                id=None,
+                simbolo=simbolo_directo,
+                fecha=cot_usd_destino.fecha,
+                precio=tasa_cruzada,
+                moneda=destino,
+                fuente="Yahoo Finance (Tiempo real)",
+            )
+
+        raise ErrorConsultaBursatil(
+            f"No fue posible obtener la tasa de cambio entre {origen} y {destino}."
+        )
+
+    def consultar_tasa_usd_cop(self) -> Cotizacion:
+        """Obtiene la tasa en tiempo real USD -> COP ('USDCOP=X' en Yahoo Finance)."""
+        return self.consultar_precio_actual(SIMBOLO_USD_COP, moneda_esperada="COP")
 
     def consultar_historial(
         self,
@@ -188,7 +263,3 @@ class ServicioBursatil:
                 f"No se encontraron cotizaciones válidas para '{simbolo_limpio}'."
             )
         return resultado
-
-    def consultar_tasa_usd_cop(self) -> Cotizacion:
-        """Obtiene la tasa en tiempo real USD -> COP ('USDCOP=X' en Yahoo Finance)."""
-        return self.consultar_precio_actual(SIMBOLO_USD_COP, moneda_esperada="COP")

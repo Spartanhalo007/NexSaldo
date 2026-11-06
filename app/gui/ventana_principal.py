@@ -4,10 +4,12 @@ from pathlib import Path
 import customtkinter as ctk
 from PIL import Image
 
+from app.gui.adaptadores_moneda import (
+    VistaCuentasConDivisa,
+    VistaMovimientosConDivisa,
+)
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
-from app.gui.vista_cuentas import VistaCuentas
 from app.gui.vista_gastos import VistaGastos
-from app.gui.vista_movimientos import VistaMovimientos
 from app.gui.vista_resumen import VistaResumen
 
 RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
@@ -163,7 +165,7 @@ class VentanaPrincipal(ctk.CTk):
 
     def _mostrar_cuentas(self):
         self._limpiar_area()
-        self._vista_actual = VistaCuentas(self._area, self._gestor)
+        self._vista_actual = VistaCuentasConDivisa(self._area, self._gestor)
         self._vista_actual.pack(fill="both", expand=True)
 
     def _mostrar_gastos(self):
@@ -173,7 +175,7 @@ class VentanaPrincipal(ctk.CTk):
 
     def _mostrar_movimientos(self, filtro_tipo, titulo):
         self._limpiar_area()
-        self._vista_actual = VistaMovimientos(
+        self._vista_actual = VistaMovimientosConDivisa(
             self._area, self._gestor, filtro_tipo=filtro_tipo, titulo=titulo
         )
         self._vista_actual.pack(fill="both", expand=True)

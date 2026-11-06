@@ -8,6 +8,11 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from app.modelo.categoria import Categoria
 from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
+from app.modelo.divisas import (
+    CODIGOS_DIVISAS_ORDENADOS,
+    DIVISAS_MUNDIALES,
+    construir_lista_selector_divisas,
+)
 from app.modelo.etiqueta import Etiqueta
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
@@ -18,7 +23,7 @@ from app.servicio.servicio_bursatil import (
 )
 
 TIPOS_VALIDOS = ("INGRESO", "GASTO")
-MONEDAS_VALIDAS = ("COP", "USD")
+MONEDAS_VALIDAS = CODIGOS_DIVISAS_ORDENADOS
 FRECUENCIAS_VALIDAS = ("DIARIO", "SEMANAL", "QUINCENAL", "MENSUAL", "ANUAL")
 PATRON_VALOR = re.compile(r"^\d+([.,]\d{1,2})?$")
 PATRON_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -169,14 +174,152 @@ class GestorFinanciero:
         self._repositorio = repositorio
         self._servicio_bursatil = servicio_bursatil or ServicioBursatil()
         self._cotizacion_usd_cop_memoria: Optional[Cotizacion] = None
+        self._tasas_memoria: Dict[Tuple[str, str], Cotizacion] = {}
+        self._monedas_recientes_memoria: List[str] = ["USD", "EUR", "MXN", "GBP"]
         self._categorias_memoria_extra: Dict[str, Categoria] = {
             c.nombre: c for c in CATEGORIAS_GASTO_PREDETERMINADAS
         }
         self._etiquetas_memoria_extra: Dict[str, Etiqueta] = {}
 
     # ------------------------------------------------------------------
-    # Conversión en tiempo real USD <-> COP (Yahoo Finance / yfinance)
+    # Historial de las últimas 5 divisas usadas y Selector Mundial
     # ------------------------------------------------------------------
+    def registrar_moneda_usada(self, codigo: str) -> None:
+        if not isinstance(codigo, str):
+            return
+        limpia = codigo.strip().upper()
+        if limpia not in DIVISAS_MUNDIALES or limpia == "COP":
+            return
+        if limpia in self._monedas_recientes_memoria:
+            self._monedas_recientes_memoria.remove(limpia)
+        self._monedas_recientes_memoria.insert(0, limpia)
+        self._monedas_recientes_memoria = self._monedas_recientes_memoria[:4]
+
+        if hasattr(self._repositorio, "registrar_moneda_reciente"):
+            try:
+                self._repositorio.registrar_moneda_reciente(limpia)
+            except Exception:
+                pass
+
+    def obtener_ultimas_5_monedas(self) -> List[str]:
+        """Devuelve siempre ['COP', <hasta 4 últimas divisas usadas>]."""
+        recientes_bd: List[str] = []
+        if hasattr(self._repositorio, "obtener_monedas_recientes"):
+            try:
+                recientes_bd = self._repositorio.obtener_monedas_recientes(4)
+            except Exception:
+                recientes_bd = []
+
+        combinadas: List[str] = ["COP"]
+        for cod in list(recientes_bd) + list(self._monedas_recientes_memoria):
+            c = cod.strip().upper()
+            if c in DIVISAS_MUNDIALES and c not in combinadas:
+                combinadas.append(c)
+            if len(combinadas) >= 5:
+                break
+        return combinadas
+
+    def obtener_opciones_selector_divisas(self) -> List[str]:
+        """Devuelve la lista completa para cualquier desplegable de moneda:
+        1) Primero COP + las 4 últimas divisas usadas.
+        2) Luego todas las divisas del mundo en orden alfabético (A-Z)."""
+        ultimas_5 = self.obtener_ultimas_5_monedas()
+        return construir_lista_selector_divisas(ultimas_5[1:])
+
+    # ------------------------------------------------------------------
+    # Conversión en tiempo real entre cualquier par de divisas (Yahoo Finance)
+    # ------------------------------------------------------------------
+    def obtener_tasa_cambio(
+        self,
+        moneda_origen: str,
+        moneda_destino: str,
+        forzar_actualizacion: bool = False,
+    ) -> Optional[Cotizacion]:
+        origen = self._validar_moneda(moneda_origen)
+        destino = self._validar_moneda(moneda_destino)
+        if origen == destino:
+            return Cotizacion(
+                id=None,
+                simbolo=f"{origen}{destino}=X",
+                fecha=date.today(),
+                precio=Decimal("1.00000000"),
+                moneda=destino,
+                fuente="Paridad 1:1",
+            )
+
+        par = (origen, destino)
+        simbolo_par = f"{origen}{destino}=X"
+
+        if not forzar_actualizacion:
+            if par in self._tasas_memoria:
+                return self._tasas_memoria[par]
+            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                guardada = self._repositorio.obtener_ultima_cotizacion(simbolo_par)
+                # Ignorar si era una tasa pequeña truncada a 4 decimales (ej. 0.0003)
+                if guardada is not None and (
+                    guardada.precio >= Decimal("0.01")
+                    or guardada.precio.as_tuple().exponent <= -6
+                ):
+                    self._tasas_memoria[par] = guardada
+                    return guardada
+
+        try:
+            nueva = self._servicio_bursatil.consultar_tasa_cambio(origen, destino)
+            if hasattr(self._repositorio, "guardar_cotizaciones"):
+                guardadas = self._repositorio.guardar_cotizaciones([nueva])
+                if guardadas:
+                    nueva = guardadas[0]
+            self._tasas_memoria[par] = nueva
+            if par == ("USD", "COP"):
+                self._cotizacion_usd_cop_memoria = nueva
+            return nueva
+        except ErrorConsultaBursatil:
+            if par in self._tasas_memoria:
+                return self._tasas_memoria[par]
+            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                return self._repositorio.obtener_ultima_cotizacion(simbolo_par)
+            return None
+
+    def convertir_entre_monedas(
+        self,
+        monto: Decimal,
+        moneda_origen: str,
+        moneda_destino: str,
+        tasa: Optional[Decimal] = None,
+    ) -> Decimal:
+        """Convierte cualquier monto desde `moneda_origen` hacia `moneda_destino` con máxima precisión.
+        Si no se pasa `tasa` explícita y una de las monedas es más débil (ej. COP -> USD),
+        divide directamente por la tasa fuerte (ej. `monto / tasa(USD->COP)`), garantizando
+        que `convertir_entre_monedas(100000, 'COP', 'USD')` dé exactamente el mismo valor
+        que el diálogo de Añadir Gasto (ej. $31,05 USD en vez de $30,00 USD)."""
+        origen = self._validar_moneda(moneda_origen)
+        destino = self._validar_moneda(moneda_destino)
+        monto_dec = Decimal(str(monto))
+        if origen == destino:
+            return monto_dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if tasa is not None:
+            if tasa <= Decimal("0"):
+                raise ErrorValidacion("La tasa de cambio debe ser mayor que cero.")
+            return (monto_dec * tasa).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Caso directo exacto con COP <-> USD o cualquier par donde la tasa inversa es >= 1
+        if origen == "COP" and destino != "COP":
+            cot_inversa = self.obtener_tasa_cambio(destino, "COP")
+            if cot_inversa is not None and cot_inversa.precio > Decimal("0"):
+                return (monto_dec / cot_inversa.precio).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+
+        cot = self.obtener_tasa_cambio(origen, destino)
+        if cot is None or cot.precio <= Decimal("0"):
+            raise ErrorValidacion(
+                f"No hay tasa de cambio disponible de {origen} a {destino}."
+            )
+        return (monto_dec * cot.precio).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
     def obtener_tasa_usd_cop(self, forzar_actualizacion: bool = False) -> Optional[Cotizacion]:
         """Devuelve la cotización en tiempo real USD->COP o el último valor guardado localmente."""
         if not forzar_actualizacion:
@@ -195,6 +338,7 @@ class GestorFinanciero:
                 if guardadas:
                     nueva = guardadas[0]
             self._cotizacion_usd_cop_memoria = nueva
+            self._tasas_memoria[("USD", "COP")] = nueva
             return nueva
         except ErrorConsultaBursatil:
             if self._cotizacion_usd_cop_memoria is not None:
@@ -226,6 +370,130 @@ class GestorFinanciero:
         if tasa_efectiva <= Decimal("0"):
             raise ErrorValidacion("La tasa de cambio debe ser mayor que cero.")
         return (monto_cop / tasa_efectiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    # ------------------------------------------------------------------
+    # Resúmenes y Totales Unificados ("Solo esta divisa" vs "Todo convertido")
+    # ------------------------------------------------------------------
+    def resumen_del_mes_en_moneda(
+        self,
+        anno: int,
+        mes: int,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = False,
+    ) -> Dict[str, object]:
+        moneda_dest = self._validar_moneda(moneda_objetivo)
+        self.registrar_moneda_usada(moneda_dest)
+        por_moneda = self.resumen_del_mes(anno, mes)
+
+        if not incluir_todas_convertidas:
+            datos = por_moneda.get(moneda_dest)
+            if not datos:
+                return {
+                    "ingresos": Decimal("0"),
+                    "gastos": Decimal("0"),
+                    "gastos_por_categoria": {},
+                }
+            return {
+                "ingresos": datos["ingresos"],
+                "gastos": datos["gastos"],
+                "gastos_por_categoria": dict(datos["gastos_por_categoria"]),  # type: ignore[arg-type]
+            }
+
+        total_ingresos = Decimal("0")
+        total_gastos = Decimal("0")
+        gastos_cat_unificados: Dict[str, Decimal] = {}
+
+        for mon_orig, datos in por_moneda.items():
+            ing_orig: Decimal = datos["ingresos"]  # type: ignore[assignment]
+            gas_orig: Decimal = datos["gastos"]  # type: ignore[assignment]
+            cats_orig: Dict[str, Decimal] = datos["gastos_por_categoria"]  # type: ignore[assignment]
+
+            if ing_orig > Decimal("0"):
+                total_ingresos += self.convertir_entre_monedas(ing_orig, mon_orig, moneda_dest)
+            if gas_orig > Decimal("0"):
+                total_gastos += self.convertir_entre_monedas(gas_orig, mon_orig, moneda_dest)
+            for cat_nombre, monto_cat in cats_orig.items():
+                monto_conv = self.convertir_entre_monedas(monto_cat, mon_orig, moneda_dest)
+                gastos_cat_unificados[cat_nombre] = (
+                    gastos_cat_unificados.get(cat_nombre, Decimal("0")) + monto_conv
+                )
+
+        return {
+            "ingresos": total_ingresos,
+            "gastos": total_gastos,
+            "gastos_por_categoria": gastos_cat_unificados,
+        }
+
+    def resumen_gastos_periodo(
+        self,
+        fecha_inicio: Optional[date] = None,
+        fecha_fin: Optional[date] = None,
+        moneda_objetivo: Optional[str] = None,
+        incluir_todas_convertidas: bool = False,
+    ) -> Dict[str, Dict[str, object]]:
+        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
+            raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
+
+        mapa_cat = {c.nombre: c for c in self.obtener_categorias_detalladas("GASTO")}
+        gastos = self.obtener_movimientos("GASTO", fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+        if moneda_objetivo and incluir_todas_convertidas:
+            mon_dest = self._validar_moneda(moneda_objetivo)
+            self.registrar_moneda_usada(mon_dest)
+            datos_unificados: Dict[str, object] = {
+                "total": Decimal("0"),
+                "por_categoria": {},
+                "colores": {},
+                "simbolos": {},
+            }
+            for g in gastos:
+                valor_conv = self.convertir_entre_monedas(g.valor, g.moneda, mon_dest)
+                datos_unificados["total"] = datos_unificados["total"] + valor_conv  # type: ignore[operator]
+                por_cat: Dict[str, Decimal] = datos_unificados["por_categoria"]  # type: ignore[assignment]
+                por_cat[g.categoria] = por_cat.get(g.categoria, Decimal("0")) + valor_conv
+
+                cat_info = mapa_cat.get(g.categoria)
+                colores: Dict[str, str] = datos_unificados["colores"]  # type: ignore[assignment]
+                simbolos: Dict[str, str] = datos_unificados["simbolos"]  # type: ignore[assignment]
+                colores[g.categoria] = cat_info.color if cat_info else "#FBB718"
+                simbolos[g.categoria] = cat_info.simbolo if cat_info else "mercado"
+            return {mon_dest: datos_unificados} if gastos else {}
+
+        resumen: Dict[str, Dict[str, object]] = {}
+        for g in gastos:
+            datos_moneda = resumen.setdefault(
+                g.moneda,
+                {"total": Decimal("0"), "por_categoria": {}, "colores": {}, "simbolos": {}},
+            )
+            datos_moneda["total"] = datos_moneda["total"] + g.valor
+            por_cat = datos_moneda["por_categoria"]  # type: ignore[assignment]
+            por_cat[g.categoria] = por_cat.get(g.categoria, Decimal("0")) + g.valor
+
+            cat_info = mapa_cat.get(g.categoria)
+            colores = datos_moneda["colores"]  # type: ignore[assignment]
+            simbolos = datos_moneda["simbolos"]  # type: ignore[assignment]
+            colores[g.categoria] = cat_info.color if cat_info else "#FBB718"
+            simbolos[g.categoria] = cat_info.simbolo if cat_info else "mercado"
+
+        return resumen
+
+    def calcular_total_cuentas_en_moneda(
+        self,
+        cuentas_con_saldo: Iterable[Tuple[Cuenta, Decimal]],
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = False,
+    ) -> Decimal:
+        mon_dest = self._validar_moneda(moneda_objetivo)
+        self.registrar_moneda_usada(mon_dest)
+        total = Decimal("0")
+        for cuenta, saldo in cuentas_con_saldo:
+            if not cuenta.incluye_en_total:
+                continue
+            if cuenta.moneda == mon_dest:
+                total += saldo
+            elif incluir_todas_convertidas:
+                total += self.convertir_entre_monedas(saldo, cuenta.moneda, mon_dest)
+        return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
     # Categorías (compatibilidad total + creación customizada)
@@ -359,6 +627,7 @@ class GestorFinanciero:
         moneda_valida = self._validar_moneda(moneda)
         categoria_valida = self._validar_categoria(categoria)
         descripcion_valida = self._validar_descripcion(descripcion)
+        self.registrar_moneda_usada(moneda_valida)
 
         if cuenta_id is not None:
             cuenta = self.obtener_cuenta(cuenta_id)
@@ -457,35 +726,6 @@ class GestorFinanciero:
         gastos = self.obtener_movimientos("GASTO")
         return gastos[0].fecha if gastos else None
 
-    def resumen_gastos_periodo(
-        self,
-        fecha_inicio: Optional[date] = None,
-        fecha_fin: Optional[date] = None,
-    ) -> Dict[str, Dict[str, object]]:
-        if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
-            raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
-
-        mapa_cat = {c.nombre: c for c in self.obtener_categorias_detalladas("GASTO")}
-        gastos = self.obtener_movimientos("GASTO", fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
-
-        resumen: Dict[str, Dict[str, object]] = {}
-        for g in gastos:
-            datos_moneda = resumen.setdefault(
-                g.moneda,
-                {"total": Decimal("0"), "por_categoria": {}, "colores": {}, "simbolos": {}},
-            )
-            datos_moneda["total"] = datos_moneda["total"] + g.valor
-            por_cat: Dict[str, Decimal] = datos_moneda["por_categoria"]  # type: ignore[assignment]
-            por_cat[g.categoria] = por_cat.get(g.categoria, Decimal("0")) + g.valor
-
-            cat_info = mapa_cat.get(g.categoria)
-            colores: Dict[str, str] = datos_moneda["colores"]  # type: ignore[assignment]
-            simbolos: Dict[str, str] = datos_moneda["simbolos"]  # type: ignore[assignment]
-            colores[g.categoria] = cat_info.color if cat_info else "#FBB718"
-            simbolos[g.categoria] = cat_info.simbolo if cat_info else "mercado"
-
-        return resumen
-
     def resumen_del_mes(self, anno: int, mes: int) -> Dict[str, Dict[str, object]]:
         if not isinstance(anno, int) or isinstance(anno, bool) or anno < 1900 or anno > 9999:
             raise ValueError("El año debe ser un número entero válido.")
@@ -533,6 +773,7 @@ class GestorFinanciero:
         simbolo_limpio = self._validar_simbolo(simbolo)
         color_limpio = self._validar_color(color)
         nota_limpia = self._validar_descripcion(nota)
+        self.registrar_moneda_usada(moneda_limpia)
 
         cuenta = Cuenta(
             id=None,
@@ -677,8 +918,8 @@ class GestorFinanciero:
         if not isinstance(moneda, str):
             raise ErrorValidacion("La moneda es obligatoria.")
         limpia = moneda.strip().upper()
-        if limpia not in MONEDAS_VALIDAS:
-            raise ErrorValidacion(f"La moneda debe ser una de: {', '.join(MONEDAS_VALIDAS)}.")
+        if limpia not in DIVISAS_MUNDIALES:
+            raise ErrorValidacion(f"La moneda '{limpia}' no es una divisa ISO válida.")
         return limpia
 
     def _validar_categoria(self, categoria: str) -> str:

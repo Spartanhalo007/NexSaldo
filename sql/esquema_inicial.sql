@@ -1,5 +1,5 @@
 -- Esquema de base de datos local para NexSaldo
--- Incluye tablas originales, Módulo de Gastos y Cotizaciones en tiempo real (Yahoo Finance)
+-- Incluye tablas originales, Módulo de Gastos, Divisas Mundiales y Cotizaciones en tiempo real (Yahoo Finance)
 
 CREATE TABLE IF NOT EXISTS categoria (
     id SERIAL PRIMARY KEY,
@@ -23,7 +23,7 @@ ALTER TABLE categoria ADD COLUMN IF NOT EXISTS frecuencia VARCHAR(20);
 CREATE TABLE IF NOT EXISTS cuenta (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(60) NOT NULL,
-    moneda CHAR(3) NOT NULL CHECK (moneda IN ('COP', 'USD')),
+    moneda CHAR(3) NOT NULL,
     saldo_inicial NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (saldo_inicial >= 0),
     simbolo VARCHAR(40) NOT NULL,
     color CHAR(7) NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS movimiento_financiero (
     tipo_movimiento VARCHAR(10) NOT NULL CHECK (tipo_movimiento IN ('INGRESO', 'GASTO')),
     fecha DATE NOT NULL,
     valor NUMERIC(14,2) NOT NULL CHECK (valor > 0),
-    moneda CHAR(3) NOT NULL CHECK (moneda IN ('COP', 'USD')),
+    moneda CHAR(3) NOT NULL,
     categoria_id INTEGER NOT NULL REFERENCES categoria(id),
     descripcion VARCHAR(200),
     cuenta_id INTEGER REFERENCES cuenta(id) ON DELETE SET NULL,
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS transferencia (
     cuenta_origen_id INTEGER NOT NULL REFERENCES cuenta(id),
     cuenta_destino_id INTEGER NOT NULL REFERENCES cuenta(id),
     valor NUMERIC(14,2) NOT NULL CHECK (valor > 0),
-    moneda CHAR(3) NOT NULL CHECK (moneda IN ('COP', 'USD')),
+    moneda CHAR(3) NOT NULL,
     fecha DATE NOT NULL,
     comentarios VARCHAR(200),
     imagen VARCHAR(300),
@@ -78,8 +78,19 @@ CREATE TABLE IF NOT EXISTS transferencia (
     CONSTRAINT origen_distinto_de_destino CHECK (cuenta_origen_id <> cuenta_destino_id)
 );
 
+-- Ampliar restricciones de moneda existentes para permitir todas las divisas ISO 4217 del mundo
+ALTER TABLE cuenta DROP CONSTRAINT IF EXISTS cuenta_moneda_check;
+ALTER TABLE movimiento_financiero DROP CONSTRAINT IF EXISTS movimiento_financiero_moneda_check;
+ALTER TABLE transferencia DROP CONSTRAINT IF EXISTS transferencia_moneda_check;
+
 CREATE TABLE IF NOT EXISTS color_reciente (
     valor CHAR(7) PRIMARY KEY,
+    fecha_uso TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Historial de las últimas divisas usadas por el usuario (para mostrar COP + 4 últimas en el selector)
+CREATE TABLE IF NOT EXISTS moneda_reciente (
+    codigo CHAR(3) PRIMARY KEY,
     fecha_uso TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

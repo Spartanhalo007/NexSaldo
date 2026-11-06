@@ -1,34 +1,22 @@
-"""Vista de resumen financiero del mes — preparación de RF-05.
+"""Vista de Resumen Financiero con soporte de todas las divisas del mundo
+(COP + 4 últimas usadas + orden alfabético A-Z) y modo 'Solo esta moneda' vs 'Todo convertido'."""
 
-Muestra, como en el mockup: una dona con los gastos por categoría del mes,
-los totales del mes por moneda y el desglose por categoría. La columna de
-inversiones del mockup se informa como pendiente (CU-03/CU-04), sin
-presentar datos inexistentes.
-
-Reglas de la tesis aplicadas aquí:
-- No se suman importes de monedas distintas: la dona y los totales se
-  muestran para la moneda seleccionada (COP o USD).
-- No se calcula saldo ni patrimonio neto: esa fórmula está pendiente de
-  aprobación.
-- Un fallo de base de datos se informa sin presentar datos parciales.
-"""
-
-import tkinter as tk
 from datetime import date
 from decimal import Decimal
-from tkinter import messagebox
-
+import tkinter as tk
 import customtkinter as ctk
 
 from app.gui.estilos import COLORES, COLORES_GRAFICA, FUENTE
 from app.gui.formato import formatear_valor, nombre_mes
+from app.gui.selector_moneda import BarraFiltroMoneda
 
 TAMANO_DONA = 220
-GROSOR_DONA = 46
+GROSOR_DONA = 32
 
 
 class VistaResumen(ctk.CTkFrame):
-    """Panel de resumen del mes: dona de gastos, totales y desglose."""
+    """Muestra el resumen mensual de gastos por categoría, ingresos e inversiones,
+    filtrando solo por la divisa seleccionada o convirtiendo todo a la divisa elegida."""
 
     def __init__(self, master, gestor, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -37,247 +25,422 @@ class VistaResumen(ctk.CTkFrame):
         hoy = date.today()
         self._anno = hoy.year
         self._mes = hoy.month
+        self._moneda_actual = "COP"
+        self._incluir_todas_convertidas = False
 
         self._construir_encabezado()
         self._construir_columnas()
-
         self.refrescar()
 
-    # ------------------------------------------------------------------
-    # Encabezado y columnas
-    # ------------------------------------------------------------------
-
     def _construir_encabezado(self):
-        ctk.CTkLabel(self, text="Resumen Financiero",
-                     font=(FUENTE, 24, "bold"),
-                     text_color=COLORES["texto"]).pack()
-        ctk.CTkLabel(self, text=nombre_mes(self._anno, self._mes).capitalize(),
-                     font=(FUENTE, 13),
-                     text_color=COLORES["texto_secundario"]).pack(pady=(0, 4))
+        cabecera = ctk.CTkFrame(self, fg_color="transparent")
+        cabecera.pack(fill="x", pady=(0, 12))
 
-        # Selector de moneda: los totales nunca mezclan monedas.
-        fila_moneda = ctk.CTkFrame(self, fg_color="transparent")
-        fila_moneda.pack(pady=(2, 6))
-        ctk.CTkLabel(fila_moneda, text="Moneda:", font=(FUENTE, 12),
-                     text_color=COLORES["texto_secundario"]).pack(
-            side="left", padx=(0, 6))
-        self._campo_moneda = ctk.CTkComboBox(
-            fila_moneda, values=["COP", "USD"], width=80,
-            corner_radius=8, command=lambda _valor: self.refrescar(),
+        fila_titulo = ctk.CTkFrame(cabecera, fg_color="transparent")
+        fila_titulo.pack(fill="x")
+
+        ctk.CTkLabel(
+            fila_titulo,
+            text="Resumen Financiero",
+            font=(FUENTE, 24, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(side="left")
+
+        # Controles de navegación de mes
+        marco_mes = ctk.CTkFrame(fila_titulo, fg_color="transparent")
+        marco_mes.pack(side="right")
+
+        ctk.CTkButton(
+            marco_mes,
+            text="◀",
+            width=32,
+            height=30,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            command=lambda: self._cambiar_mes(-1),
+        ).pack(side="left", padx=4)
+
+        self._etiqueta_mes = ctk.CTkLabel(
+            marco_mes,
+            text=nombre_mes(self._anno, self._mes).capitalize(),
+            font=(FUENTE, 14, "bold"),
+            text_color=COLORES["texto_secundario"],
+            width=155,
         )
-        self._campo_moneda.set("COP")
-        self._campo_moneda.pack(side="left")
+        self._etiqueta_mes.pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            marco_mes,
+            text="▶",
+            width=32,
+            height=30,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            command=lambda: self._cambiar_mes(1),
+        ).pack(side="left", padx=4)
+
+        # Barra de filtro de moneda (COP + 4 últimas + Todas A-Z) y modo (Solo esta moneda vs Todo convertido)
+        fila_moneda = ctk.CTkFrame(
+            cabecera, fg_color=COLORES["fondo_tarjeta"], corner_radius=10
+        )
+        fila_moneda.pack(fill="x", pady=(10, 0))
+
+        contenedor_barra = ctk.CTkFrame(fila_moneda, fg_color="transparent")
+        contenedor_barra.pack(fill="x", padx=14, pady=8)
+
+        self._barra_moneda = BarraFiltroMoneda(
+            contenedor_barra,
+            gestor=self._gestor,
+            al_cambiar=self._al_cambiar_filtro_moneda,
+            moneda_inicial="COP",
+            mostrar_modo=True,
+        )
+        self._barra_moneda.pack(side="left")
+
+        self._etiqueta_modo_activo = ctk.CTkLabel(
+            contenedor_barra,
+            text="Mostrando solo movimientos en COP",
+            font=(FUENTE, 11),
+            text_color=COLORES["texto_secundario"],
+        )
+        self._etiqueta_modo_activo.pack(side="right")
 
     def _construir_columnas(self):
         columnas = ctk.CTkFrame(self, fg_color="transparent")
         columnas.pack(fill="both", expand=True)
-        columnas.columnconfigure(0, weight=1, uniform="resumen")
-        columnas.columnconfigure(1, weight=1, uniform="resumen")
-        columnas.rowconfigure(0, weight=1)
+        columnas.grid_columnconfigure(0, weight=1)
+        columnas.grid_columnconfigure(1, weight=1)
+        columnas.grid_rowconfigure(0, weight=1)
 
         self._construir_columna_gastos(columnas)
         self._construir_columna_inversiones(columnas)
 
-    # ------------------------------------------------------------------
-    # Columna izquierda: dona de gastos y desglose
-    # ------------------------------------------------------------------
-
     def _construir_columna_gastos(self, columnas):
-        panel = ctk.CTkFrame(columnas, fg_color="transparent")
-        panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        col_gastos = ctk.CTkFrame(
+            columnas, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
+        )
+        col_gastos.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
-        ctk.CTkLabel(panel, text="Gastos por categoría este mes",
-                     font=(FUENTE, 13, "bold"),
-                     text_color=COLORES["texto"]).pack(anchor="w")
+        self._titulo_col_gastos = ctk.CTkLabel(
+            col_gastos,
+            text="Gastos por categoría este mes",
+            font=(FUENTE, 16, "bold"),
+            text_color=COLORES["texto"],
+        )
+        self._titulo_col_gastos.pack(pady=(14, 4))
 
-        # Dona dibujada sobre un Canvas (sin librerías externas).
-        self._lienzo = tk.Canvas(panel, width=TAMANO_DONA, height=TAMANO_DONA,
-                                 bg=COLORES["fondo_contenido"],
-                                 highlightthickness=0)
-        self._lienzo.pack(pady=12)
+        self._lienzo = tk.Canvas(
+            col_gastos,
+            width=TAMANO_DONA,
+            height=TAMANO_DONA,
+            bg=COLORES["fondo_tarjeta"],
+            highlightthickness=0,
+        )
+        self._lienzo.pack(pady=4)
 
         self._etiqueta_total_gastos = ctk.CTkLabel(
-            panel, text="Gastos del mes: —", font=(FUENTE, 14, "bold"),
-            text_color=COLORES["texto"])
-        self._etiqueta_total_gastos.pack(pady=(0, 4))
+            col_gastos,
+            text="Total gastos: $ 0,00",
+            font=(FUENTE, 14, "bold"),
+            text_color=COLORES["texto"],
+        )
+        self._etiqueta_total_gastos.pack(pady=(2, 8))
 
-        # Tarjeta de desglose por categoría (como en el mockup).
-        tarjeta = ctk.CTkFrame(panel, fg_color=COLORES["fondo_tarjeta"],
-                               corner_radius=14)
-        tarjeta.pack(fill="both", expand=True, pady=(6, 0))
-        ctk.CTkLabel(tarjeta, text="Gastos por categoría · Este mes",
-                     font=(FUENTE, 12, "bold"),
-                     text_color=COLORES["texto"]).pack(anchor="w", padx=14,
-                                                       pady=(10, 4))
-        self._marco_desglose = ctk.CTkFrame(tarjeta, fg_color="transparent")
-        self._marco_desglose.pack(fill="both", expand=True, padx=14,
-                                  pady=(0, 10))
+        fila_ing_gas = ctk.CTkFrame(
+            col_gastos, fg_color=COLORES["boton_lateral"], corner_radius=10
+        )
+        fila_ing_gas.pack(fill="x", padx=16, pady=(0, 10))
 
-    # ------------------------------------------------------------------
-    # Columna derecha: totales e inversiones
-    # ------------------------------------------------------------------
+        self._etiqueta_ingresos = ctk.CTkLabel(
+            fila_ing_gas,
+            text="Ingresos: $ 0,00",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["exito"],
+        )
+        self._etiqueta_ingresos.pack(side="left", padx=12, pady=8)
+
+        self._etiqueta_gastos = ctk.CTkLabel(
+            fila_ing_gas,
+            text="Gastos: $ 0,00",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["error"],
+        )
+        self._etiqueta_gastos.pack(side="right", padx=12, pady=8)
+
+        self._marco_desglose = ctk.CTkScrollableFrame(
+            col_gastos, fg_color=COLORES["boton_lateral"], corner_radius=10, height=150
+        )
+        self._marco_desglose.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
     def _construir_columna_inversiones(self, columnas):
-        panel = ctk.CTkFrame(columnas, fg_color="transparent")
-        panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        col_inv = ctk.CTkFrame(
+            columnas, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
+        )
+        col_inv.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        # Totales del mes para la moneda seleccionada.
-        tarjeta_totales = ctk.CTkFrame(panel, fg_color=COLORES["fondo_tarjeta"],
-                                       corner_radius=14)
-        tarjeta_totales.pack(fill="x")
-        ctk.CTkLabel(tarjeta_totales, text="Totales del mes",
-                     font=(FUENTE, 12, "bold"),
-                     text_color=COLORES["texto"]).pack(anchor="w", padx=14,
-                                                        pady=(10, 2))
-        self._etiqueta_ingresos = ctk.CTkLabel(tarjeta_totales,
-                                               text="Ingresos: —",
-                                               font=(FUENTE, 13),
-                                               text_color=COLORES["exito"])
-        self._etiqueta_ingresos.pack(anchor="w", padx=14, pady=2)
-        self._etiqueta_gastos = ctk.CTkLabel(tarjeta_totales,
-                                             text="Gastos: —",
-                                             font=(FUENTE, 13),
-                                             text_color=COLORES["error"])
-        self._etiqueta_gastos.pack(anchor="w", padx=14, pady=2)
-        ctk.CTkLabel(tarjeta_totales,
-                     text="Sin sumar monedas distintas ni calcular saldo.",
-                     font=(FUENTE, 10, "italic"),
-                     text_color=COLORES["texto_secundario"]).pack(
-            anchor="w", padx=14, pady=(2, 10))
-
-        # Columna de inversiones del mockup: módulo pendiente, sin datos
-        # inventados.
-        tarjeta = ctk.CTkFrame(panel, fg_color=COLORES["fondo_tarjeta"],
-                               corner_radius=14)
-        tarjeta.pack(fill="both", expand=True, pady=(12, 0))
-        ctk.CTkLabel(tarjeta, text="Inversiones",
-                     font=(FUENTE, 13, "bold"),
-                     text_color=COLORES["texto"]).pack(anchor="w", padx=14,
-                                                       pady=(12, 2))
-        ctk.CTkLabel(tarjeta, text="Inversiones actuales: —",
-                     font=(FUENTE, 14, "bold"),
-                     text_color=COLORES["texto_secundario"]).pack(
-            anchor="w", padx=14, pady=4)
         ctk.CTkLabel(
-            tarjeta,
-            text="El módulo de inversiones bursátiles (ETFs y acciones con "
-                 "datos de cierre de Yahoo Finance) se implementará en una "
-                 "etapa posterior (CU-03, CU-04).",
-            wraplength=300, justify="left", font=(FUENTE, 11),
-            text_color=COLORES["texto_secundario"],
-        ).pack(anchor="w", padx=14, pady=(2, 12))
+            col_inv,
+            text="Cuentas e Inversiones",
+            font=(FUENTE, 16, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(pady=(14, 6))
 
-    # ------------------------------------------------------------------
-    # Actualización de datos
-    # ------------------------------------------------------------------
+        self._etiqueta_saldo_cuentas_resumen = ctk.CTkLabel(
+            col_inv,
+            text="Saldo en cuentas: $ 0,00",
+            font=(FUENTE, 16, "bold"),
+            text_color=COLORES["acento"],
+        )
+        self._etiqueta_saldo_cuentas_resumen.pack(pady=(8, 4))
+
+        self._etiqueta_sub_cuentas = ctk.CTkLabel(
+            col_inv,
+            text="",
+            font=(FUENTE, 12),
+            text_color=COLORES["texto_secundario"],
+        )
+        self._etiqueta_sub_cuentas.pack(pady=(0, 12))
+
+        self._contenedor_cuentas_resumen = ctk.CTkScrollableFrame(
+            col_inv, fg_color=COLORES["boton_lateral"], corner_radius=10, height=220
+        )
+        self._contenedor_cuentas_resumen.pack(
+            fill="both", expand=True, padx=16, pady=(0, 14)
+        )
+
+    def _cambiar_mes(self, delta: int):
+        nuevo_mes = self._mes + delta
+        nuevo_anno = self._anno
+        if nuevo_mes < 1:
+            nuevo_mes = 12
+            nuevo_anno -= 1
+        elif nuevo_mes > 12:
+            nuevo_mes = 1
+            nuevo_anno += 1
+        self._mes = nuevo_mes
+        self._anno = nuevo_anno
+        self._etiqueta_mes.configure(
+            text=nombre_mes(self._anno, self._mes).capitalize()
+        )
+        self.refrescar()
+
+    def _al_cambiar_filtro_moneda(self, moneda: str, incluir_todas: bool):
+        self._moneda_actual = moneda
+        self._incluir_todas_convertidas = incluir_todas
+        self.refrescar()
 
     def refrescar(self):
-        """Consulta el resumen del mes y redibuja la dona y las tarjetas."""
-        try:
-            resumen = self._gestor.resumen_del_mes(self._anno, self._mes)
-        except Exception as error:
-            messagebox.showerror(
-                "Error de base de datos",
-                f"No se pudo consultar el resumen del mes: {error}",
+        moneda = self._moneda_actual
+        incluir_todas = self._incluir_todas_convertidas
+
+        if incluir_todas:
+            self._etiqueta_modo_activo.configure(
+                text=f"Total unificado (todas las divisas convertidas a {moneda} con Yahoo Finance)",
+                text_color=COLORES["acento"],
+            )
+        else:
+            self._etiqueta_modo_activo.configure(
+                text=f"Mostrando únicamente registros en {moneda}",
+                text_color=COLORES["texto_secundario"],
+            )
+
+        datos_mes = self._gestor.resumen_del_mes_en_moneda(
+            self._anno,
+            self._mes,
+            moneda_objetivo=moneda,
+            incluir_todas_convertidas=incluir_todas,
+        )
+        ingresos: Decimal = datos_mes["ingresos"]  # type: ignore[assignment]
+        gastos: Decimal = datos_mes["gastos"]  # type: ignore[assignment]
+        gastos_por_cat: dict = datos_mes["gastos_por_categoria"]  # type: ignore[assignment]
+
+        self._etiqueta_total_gastos.configure(
+            text=f"Total gastos ({moneda}): {formatear_valor(gastos, moneda)}"
+        )
+        self._etiqueta_ingresos.configure(
+            text=f"Ingresos: {formatear_valor(ingresos, moneda)}"
+        )
+        self._etiqueta_gastos.configure(
+            text=f"Gastos: {formatear_valor(gastos, moneda)}"
+        )
+
+        self._dibujar_dona(gastos_por_cat, moneda)
+        self._actualizar_desglose(gastos_por_cat, gastos, moneda)
+        self._actualizar_panel_cuentas(moneda, incluir_todas)
+
+    def _dibujar_dona(self, gastos_por_categoria: dict, moneda: str):
+        self._lienzo.delete("all")
+        margen = 18
+        x0, y0 = margen, margen
+        x1, y1 = TAMANO_DONA - margen, TAMANO_DONA - margen
+        centro = TAMANO_DONA // 2
+
+        total = sum(gastos_por_categoria.values(), Decimal("0"))
+        if total <= Decimal("0") or not gastos_por_categoria:
+            self._lienzo.create_oval(
+                x0, y0, x1, y1, outline=COLORES["boton_lateral"], width=GROSOR_DONA
+            )
+            self._lienzo.create_text(
+                centro,
+                centro,
+                text="Sin gastos\neste mes",
+                fill=COLORES["texto_secundario"],
+                font=(FUENTE, 12, "bold"),
+                justify="center",
             )
             return
 
-        moneda = self._campo_moneda.get()
-        datos = resumen.get(
-            moneda,
-            {"ingresos": Decimal("0"), "gastos": Decimal("0"),
-             "gastos_por_categoria": {}},
+        items = sorted(
+            gastos_por_categoria.items(), key=lambda par: par[1], reverse=True
         )
-        self._dibujar_dona(datos["gastos_por_categoria"], moneda)
-        self._actualizar_desglose(datos["gastos_por_categoria"],
-                                 datos["gastos"], moneda)
-        self._etiqueta_total_gastos.configure(
-            text=f"Gastos del mes: {formatear_valor(datos['gastos'], moneda)}")
-        self._etiqueta_ingresos.configure(
-            text=f"Ingresos: {formatear_valor(datos['ingresos'], moneda)}")
-        self._etiqueta_gastos.configure(
-            text=f"Gastos: {formatear_valor(datos['gastos'], moneda)}")
-
-    def _dibujar_dona(self, gastos_por_categoria, moneda):
-        """Dibuja la dona de gastos por categoría sobre el Canvas."""
-        self._lienzo.delete("all")
-        centro = TAMANO_DONA / 2
-        radio = centro - 4
-        total = sum(gastos_por_categoria.values(), Decimal("0"))
-
-        if total <= 0:
-            # Sin datos: aro neutro y aviso en el centro.
+        if len(items) == 1:
             self._lienzo.create_oval(
-                4, 4, TAMANO_DONA - 4, TAMANO_DONA - 4,
-                outline=COLORES["fondo_tarjeta"], width=GROSOR_DONA)
-            self._lienzo.create_text(
-                centro, centro, text="Sin gastos\neste mes",
-                fill=COLORES["texto_secundario"],
-                font=(FUENTE, 11), justify="center")
-            return
+                x0, y0, x1, y1, outline=COLORES_GRAFICA[0], width=GROSOR_DONA
+            )
+        else:
+            inicio = 90.0
+            for idx, (_, valor) in enumerate(items):
+                ext = -float(valor / total) * 360.0
+                color = COLORES_GRAFICA[idx % len(COLORES_GRAFICA)]
+                self._lienzo.create_arc(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    start=inicio,
+                    extent=ext,
+                    style="arc",
+                    outline=color,
+                    width=GROSOR_DONA,
+                )
+                inicio += ext
 
-        # Cada categoría ocupa un aro proporcional a su valor.
-        inicio = 90
-        for indice, (categoria, valor) in enumerate(
-                sorted(gastos_por_categoria.items(), key=lambda par: -par[1])):
-            extension = float(valor / total) * 360.0
-            color = COLORES_GRAFICA[indice % len(COLORES_GRAFICA)]
-            self._lienzo.create_arc(
-                4, 4, TAMANO_DONA - 4, TAMANO_DONA - 4,
-                start=inicio, extent=extension, style="arc",
-                outline=color, width=GROSOR_DONA)
-            inicio -= extension
-
-        # Hueco central con el total.
-        self._lienzo.create_oval(
-            centro - (radio - GROSOR_DONA / 2 - 2),
-            centro - (radio - GROSOR_DONA / 2 - 2),
-            centro + (radio - GROSOR_DONA / 2 - 2),
-            centro + (radio - GROSOR_DONA / 2 - 2),
-            fill=COLORES["fondo_contenido"], outline="")
         self._lienzo.create_text(
-            centro, centro, text="Total\n" + formatear_valor(total, moneda),
-            fill=COLORES["texto"], font=(FUENTE, 11, "bold"), justify="center")
+            centro,
+            centro,
+            text=formatear_valor(total, moneda),
+            fill=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            justify="center",
+        )
 
-    def _actualizar_desglose(self, gastos_por_categoria, total, moneda):
-        """Llena la tarjeta de desglose: color, categoría, % y valor."""
+    def _actualizar_desglose(
+        self, gastos_por_categoria: dict, total_gastos: Decimal, moneda: str
+    ):
         for hijo in self._marco_desglose.winfo_children():
             hijo.destroy()
 
-        if total <= 0:
-            ctk.CTkLabel(self._marco_desglose,
-                         text="Aún no hay gastos registrados este mes.",
-                         font=(FUENTE, 11),
-                         text_color=COLORES["texto_secundario"]).pack(
-                anchor="w", pady=6)
+        if total_gastos <= Decimal("0") or not gastos_por_categoria:
+            ctk.CTkLabel(
+                self._marco_desglose,
+                text="No hay gastos registrados en este filtro.",
+                font=(FUENTE, 12),
+                text_color=COLORES["texto_secundario"],
+            ).pack(pady=24)
             return
 
-        categorias = sorted(gastos_por_categoria.items(),
-                            key=lambda par: -par[1])
-        for indice, (categoria, valor) in enumerate(categorias):
+        for idx, (cat, monto) in enumerate(
+            sorted(gastos_por_categoria.items(), key=lambda p: p[1], reverse=True)
+        ):
+            pct = (monto / total_gastos) * Decimal("100")
             fila = ctk.CTkFrame(self._marco_desglose, fg_color="transparent")
-            fila.pack(fill="x", pady=2)
-            color = COLORES_GRAFICA[indice % len(COLORES_GRAFICA)]
-            punto = tk.Canvas(fila, width=14, height=14,
-                              bg=COLORES["fondo_tarjeta"],
-                              highlightthickness=0)
-            punto.create_oval(2, 2, 12, 12, fill=color, outline="")
-            punto.pack(side="left", padx=(0, 8))
-            porcentaje = int(round(float(valor / total) * 100))
-            ctk.CTkLabel(fila, text=categoria, font=(FUENTE, 11),
-                         text_color=COLORES["texto"]).pack(side="left")
-            ctk.CTkLabel(fila, text=f"{porcentaje}%", font=(FUENTE, 11),
-                         text_color=COLORES["texto_secundario"]).pack(
-                side="left", padx=8)
-            ctk.CTkLabel(
-                fila, text=formatear_valor(valor, moneda), font=(FUENTE, 11),
-                text_color=COLORES["texto"]).pack(side="right")
+            fila.pack(fill="x", padx=8, pady=3)
 
-        # Fila de total (como en el mockup).
-        fila_total = ctk.CTkFrame(self._marco_desglose, fg_color="transparent")
-        fila_total.pack(fill="x", pady=(8, 0))
-        ctk.CTkLabel(fila_total, text="Total", font=(FUENTE, 11, "bold"),
-                     text_color=COLORES["texto"]).pack(side="left")
-        ctk.CTkLabel(fila_total, text=formatear_valor(total, moneda),
-                     font=(FUENTE, 11, "bold"),
-                     text_color=COLORES["texto"]).pack(side="right")
+            color = COLORES_GRAFICA[idx % len(COLORES_GRAFICA)]
+            punto = ctk.CTkFrame(
+                fila, width=12, height=12, corner_radius=6, fg_color=color
+            )
+            punto.pack(side="left", padx=(4, 8))
+
+            ctk.CTkLabel(
+                fila,
+                text=cat,
+                font=(FUENTE, 12, "bold"),
+                text_color=COLORES["texto"],
+            ).pack(side="left")
+
+            ctk.CTkLabel(
+                fila,
+                text=formatear_valor(monto, moneda),
+                font=(FUENTE, 12, "bold"),
+                text_color=COLORES["texto"],
+            ).pack(side="right", padx=6)
+
+            ctk.CTkLabel(
+                fila,
+                text=f"{pct:.1f}%",
+                font=(FUENTE, 11),
+                text_color=COLORES["texto_secundario"],
+            ).pack(side="right", padx=6)
+
+    def _actualizar_panel_cuentas(self, moneda: str, incluir_todas: bool):
+        for hijo in self._contenedor_cuentas_resumen.winfo_children():
+            hijo.destroy()
+
+        cuentas_con_saldo = self._gestor.obtener_cuentas()
+        total_cuentas = self._gestor.calcular_total_cuentas_en_moneda(
+            cuentas_con_saldo,
+            moneda_objetivo=moneda,
+            incluir_todas_convertidas=incluir_todas,
+        )
+        self._etiqueta_saldo_cuentas_resumen.configure(
+            text=f"Saldo disponible ({moneda}): {formatear_valor(total_cuentas, moneda)}"
+        )
+        self._etiqueta_sub_cuentas.configure(
+            text="Incluyendo todas las cuentas convertidas"
+            if incluir_todas
+            else f"Mostrando solo cuentas en {moneda}"
+        )
+
+        cuentas_mostrar = [
+            (c, s)
+            for c, s in cuentas_con_saldo
+            if incluir_todas or c.moneda == moneda
+        ]
+        if not cuentas_mostrar:
+            ctk.CTkLabel(
+                self._contenedor_cuentas_resumen,
+                text=f"No hay cuentas en {moneda}.",
+                font=(FUENTE, 12),
+                text_color=COLORES["texto_secundario"],
+            ).pack(pady=30)
+            return
+
+        for cuenta, saldo in cuentas_mostrar:
+            fila = ctk.CTkFrame(
+                self._contenedor_cuentas_resumen,
+                fg_color=COLORES["fondo_tarjeta"],
+                corner_radius=8,
+            )
+            fila.pack(fill="x", padx=6, pady=4)
+
+            ctk.CTkLabel(
+                fila,
+                text=f"{cuenta.nombre} ({cuenta.moneda})",
+                font=(FUENTE, 12, "bold"),
+                text_color=COLORES["texto"],
+            ).pack(side="left", padx=10, pady=8)
+
+            if incluir_todas and cuenta.moneda != moneda:
+                try:
+                    conv = self._gestor.convertir_entre_monedas(
+                        saldo, cuenta.moneda, moneda
+                    )
+                    texto_saldo = f"{formatear_valor(conv, moneda)} ({formatear_valor(saldo, cuenta.moneda)})"
+                except Exception:
+                    texto_saldo = formatear_valor(saldo, cuenta.moneda)
+            else:
+                texto_saldo = formatear_valor(saldo, cuenta.moneda)
+
+            ctk.CTkLabel(
+                fila,
+                text=texto_saldo,
+                font=(FUENTE, 12, "bold"),
+                text_color=COLORES["acento"],
+            ).pack(side="right", padx=10, pady=8)
