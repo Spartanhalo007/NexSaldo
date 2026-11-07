@@ -1,11 +1,20 @@
-"""Componente reutilizable de barra de moneda mundial (COP + 4 últimas usadas + lista A-Z)
-y selector de modo ('Solo esta moneda' vs 'Todo convertido a esta moneda')."""
+"""Componente reutilizable de barra de moneda mundial (COP + 4 últimas usadas + lista A-Z),
+selector de modo ('Solo esta moneda' vs 'Todo convertido') y banner inteligente de estado de
+conexión a internet (muestra datos en caché cuando no hay red o avisa que actualizará
+automáticamente apenas se restablezca la conexión)."""
 
+import threading
 from typing import Callable, Optional
 import customtkinter as ctk
 
-from app.gestor.gestor_financiero import GestorFinanciero
+from app.gestor.gestor_financiero import (
+    ESTADO_CONEXION_ONLINE,
+    ESTADO_OFFLINE_CON_CACHE,
+    ESTADO_OFFLINE_SIN_CACHE,
+    GestorFinanciero,
+)
 from app.gui.estilos import COLORES, FUENTE
+from app.gui.formato import formatear_valor
 from app.modelo.divisas import (
     DIVISAS_MUNDIALES,
     etiqueta_divisa,
@@ -150,7 +159,9 @@ class DialogoSelectorDivisa(ctk.CTkToplevel):
 class BarraFiltroMoneda(ctk.CTkFrame):
     """Barra reutilizable para elegir:
     1) Divisa (muestra desplegable con las 5 últimas usadas empezando por COP + botón de lista mundial A-Z).
-    2) Modo de filtro: 'Solo esta moneda' vs 'Todo convertido' (convierte todo a la moneda elegida)."""
+    2) Modo de filtro: 'Solo esta moneda' vs 'Todo convertido' (convierte todo a la moneda elegida).
+    3) Aviso automático de estado de internet: informa si está usando datos en caché por falta de
+       conexión o si no hay caché y actualizará automáticamente apenas vuelva el internet."""
 
     def __init__(
         self,
@@ -166,12 +177,26 @@ class BarraFiltroMoneda(ctk.CTkFrame):
         self._al_cambiar = al_cambiar
         self._moneda_actual = (moneda_inicial or "COP").strip().upper()
         self._mostrar_modo = mostrar_modo
+        self._estaba_sin_conexion = False
+        self._verificando_red = False
+        self._id_timer_reconexion: Optional[str] = None
 
         self._construir()
+        self._construir_banner_conexion()
+
+        if hasattr(self._gestor, "registrar_listener_conexion"):
+            self._gestor.registrar_listener_conexion(self._al_cambiar_estado_conexion_gestor)
+        self.bind("<Destroy>", self._al_destruir, add="+")
+
+        # Chequeo inicial asíncrono para informar al usuario si abre la app sin internet
+        self.after(150, lambda: self._verificar_conexion_asincrona(notificar_si_reconecta=False))
 
     def _construir(self):
+        fila_controles = ctk.CTkFrame(self, fg_color="transparent")
+        fila_controles.pack(fill="x")
+
         ctk.CTkLabel(
-            self,
+            fila_controles,
             text="Moneda:",
             font=(FUENTE, 13, "bold"),
             text_color=COLORES["texto"],
@@ -179,7 +204,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
 
         opciones_combo = self._gestor.obtener_opciones_selector_divisas()
         self._combo_moneda = ctk.CTkComboBox(
-            self,
+            fila_controles,
             values=opciones_combo,
             width=215,
             height=34,
@@ -199,7 +224,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
         self._combo_moneda.pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            self,
+            fila_controles,
             text="🌍 Todas (A-Z)",
             width=105,
             height=34,
@@ -214,7 +239,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
         self._var_modo = ctk.StringVar(value=MODO_SOLO_DIVISA)
         if self._mostrar_modo:
             self._selector_modo = ctk.CTkSegmentedButton(
-                self,
+                fila_controles,
                 values=[MODO_SOLO_DIVISA, MODO_TODO_CONVERTIDO],
                 variable=self._var_modo,
                 selected_color=COLORES["acento"],
@@ -227,6 +252,197 @@ class BarraFiltroMoneda(ctk.CTkFrame):
                 command=lambda _v: self._notificar_cambio(),
             )
             self._selector_modo.pack(side="left")
+
+    def _construir_banner_conexion(self):
+        """Crea el banner de estado de conexión dentro de la tarjeta contenedora para que ocupe
+        todo el ancho debajo de la fila del selector de moneda."""
+        contenedor_tarjeta = (
+            self.master.master
+            if (self.master is not None and isinstance(getattr(self.master, "master", None), ctk.CTkFrame))
+            else self
+        )
+        self._marco_aviso_conexion = ctk.CTkFrame(
+            contenedor_tarjeta,
+            fg_color=COLORES["boton_lateral"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORES["acento"],
+        )
+
+        fila_aviso = ctk.CTkFrame(self._marco_aviso_conexion, fg_color="transparent")
+        fila_aviso.pack(fill="x", padx=12, pady=6)
+
+        self._etiqueta_aviso_conexion = ctk.CTkLabel(
+            fila_aviso,
+            text="",
+            font=(FUENTE, 11, "bold"),
+            text_color=COLORES["acento"],
+            justify="left",
+            anchor="w",
+            wraplength=760,
+        )
+        self._etiqueta_aviso_conexion.pack(side="left", fill="x", expand=True)
+
+        self._boton_reintentar_red = ctk.CTkButton(
+            fila_aviso,
+            text="🔄 Reintentar",
+            width=96,
+            height=26,
+            corner_radius=6,
+            fg_color=COLORES["fondo_tarjeta"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 11, "bold"),
+            command=lambda: self._verificar_conexion_asincrona(notificar_si_reconecta=True),
+        )
+        self._boton_reintentar_red.pack(side="right", padx=(8, 0))
+
+    def _al_destruir(self, _evento=None):
+        if self._id_timer_reconexion is not None:
+            try:
+                self.after_cancel(self._id_timer_reconexion)
+            except Exception:
+                pass
+            self._id_timer_reconexion = None
+        if hasattr(self._gestor, "desregistrar_listener_conexion"):
+            self._gestor.desregistrar_listener_conexion(self._al_cambiar_estado_conexion_gestor)
+
+    def _al_cambiar_estado_conexion_gestor(self):
+        try:
+            if self.winfo_exists():
+                self.after(0, self._actualizar_banner_desde_gestor)
+        except Exception:
+            pass
+
+    def _verificar_conexion_asincrona(self, notificar_si_reconecta: bool = True):
+        """Consulta en segundo plano si hay internet y actualiza la cotización de referencia."""
+        if self._verificando_red or not self.winfo_exists():
+            return
+        self._verificando_red = True
+        moneda_ref = self._moneda_actual if self._moneda_actual != "COP" else "USD"
+
+        def _tarea():
+            try:
+                hay_red = (
+                    self._gestor.hay_conexion_internet(usar_cache_breve=False)
+                    if hasattr(self._gestor, "hay_conexion_internet")
+                    else True
+                )
+                cot = self._gestor.obtener_tasa_cambio(
+                    moneda_ref, "COP", forzar_actualizacion=hay_red
+                )
+                if self.winfo_exists():
+                    self.after(
+                        0,
+                        lambda: self._procesar_resultado_conexion(
+                            hay_red, moneda_ref, cot, notificar_si_reconecta
+                        ),
+                    )
+            except Exception:
+                if self.winfo_exists():
+                    self.after(0, self._actualizar_banner_desde_gestor)
+            finally:
+                self._verificando_red = False
+
+        threading.Thread(target=_tarea, daemon=True).start()
+
+    def _procesar_resultado_conexion(
+        self,
+        hay_red: bool,
+        moneda_ref: str,
+        cot,
+        notificar_si_reconecta: bool,
+    ):
+        if not self.winfo_exists():
+            return
+
+        if hay_red and cot is not None and "Caché" not in (cot.fuente or ""):
+            reconectado_ahora = self._estaba_sin_conexion
+            self._estaba_sin_conexion = False
+            self._ocultar_banner_conexion()
+            if reconectado_ahora and notificar_si_reconecta:
+                self._al_cambiar(self.moneda_seleccionada(), self.es_todo_convertido())
+            return
+
+        # Modo sin conexión (Offline)
+        self._estaba_sin_conexion = True
+        if cot is not None:
+            tasa_fmt = formatear_valor(cot.precio, "COP")
+            texto = (
+                f"⚠️ Sin conexión a internet: no es posible actualizar los precios de divisas ni inversiones en tiempo real. "
+                f"Mostrando información guardada en caché (1 {moneda_ref} = {tasa_fmt} del {cot.fecha.isoformat()}). "
+                f"Tan pronto como te conectes a internet, actualizaremos la información."
+            )
+            self._mostrar_banner_conexion(texto, con_cache=True)
+        else:
+            texto = (
+                f"📡 No tienes conexión a internet y no hay información en caché para {moneda_ref}. "
+                f"Tan pronto como te conectes a internet, actualizaremos la información automáticamente."
+            )
+            self._mostrar_banner_conexion(texto, con_cache=False)
+
+        self._programar_reintento_automatico()
+
+    def _actualizar_banner_desde_gestor(self):
+        if not self.winfo_exists() or not hasattr(self._gestor, "obtener_estado_conexion_bursatil"):
+            return
+        moneda_ref = self._moneda_actual if self._moneda_actual != "COP" else "USD"
+        info = self._gestor.obtener_estado_conexion_bursatil(moneda_ref)
+        if info.get("online"):
+            reconectado = self._estaba_sin_conexion
+            self._estaba_sin_conexion = False
+            self._ocultar_banner_conexion()
+            if reconectado:
+                self._al_cambiar(self.moneda_seleccionada(), self.es_todo_convertido())
+            return
+
+        self._estaba_sin_conexion = True
+        tiene_cache = bool(info.get("tiene_cache"))
+        cot = info.get("cotizacion_cache")
+        if tiene_cache and cot is not None:
+            tasa_fmt = formatear_valor(cot.precio, "COP")
+            texto = (
+                f"⚠️ Sin conexión a internet: no es posible actualizar los precios de divisas ni inversiones en tiempo real. "
+                f"Mostrando información guardada en caché (1 {moneda_ref} = {tasa_fmt} del {cot.fecha.isoformat()}). "
+                f"Tan pronto como te conectes a internet, actualizaremos la información."
+            )
+            self._mostrar_banner_conexion(texto, con_cache=True)
+        else:
+            texto = (
+                f"📡 No tienes conexión a internet y no hay información en caché disponible. "
+                f"Tan pronto como te conectes a internet, actualizaremos la información automáticamente."
+            )
+            self._mostrar_banner_conexion(texto, con_cache=False)
+
+        self._programar_reintento_automatico()
+
+    def _mostrar_banner_conexion(self, mensaje: str, con_cache: bool):
+        color_borde = COLORES["acento"] if con_cache else COLORES["error"]
+        self._marco_aviso_conexion.configure(border_color=color_borde)
+        self._etiqueta_aviso_conexion.configure(text=mensaje, text_color=color_borde)
+        if not self._marco_aviso_conexion.winfo_ismapped():
+            self._marco_aviso_conexion.pack(fill="x", padx=14, pady=(0, 8))
+
+    def _ocultar_banner_conexion(self):
+        if self._id_timer_reconexion is not None:
+            try:
+                self.after_cancel(self._id_timer_reconexion)
+            except Exception:
+                pass
+            self._id_timer_reconexion = None
+        if self._marco_aviso_conexion.winfo_ismapped():
+            self._marco_aviso_conexion.pack_forget()
+
+    def _programar_reintento_automatico(self):
+        if self._id_timer_reconexion is not None:
+            try:
+                self.after_cancel(self._id_timer_reconexion)
+            except Exception:
+                pass
+        if self.winfo_exists():
+            self._id_timer_reconexion = self.after(
+                4000, lambda: self._verificar_conexion_asincrona(notificar_si_reconecta=True)
+            )
 
     def _refrescar_opciones_combo(self):
         opciones = self._gestor.obtener_opciones_selector_divisas()
@@ -255,6 +471,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
 
     def _notificar_cambio(self):
         self._al_cambiar(self.moneda_seleccionada(), self.es_todo_convertido())
+        self._verificar_conexion_asincrona(notificar_si_reconecta=True)
 
     def moneda_seleccionada(self) -> str:
         return self._moneda_actual
@@ -265,6 +482,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
             self._moneda_actual = limpio
             self._gestor.registrar_moneda_usada(limpio)
             self._refrescar_opciones_combo()
+            self._verificar_conexion_asincrona(notificar_si_reconecta=False)
 
     def es_todo_convertido(self) -> bool:
         return self._var_modo.get() == MODO_TODO_CONVERTIDO

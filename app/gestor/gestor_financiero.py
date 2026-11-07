@@ -1,9 +1,15 @@
-"""Lógica de negocio para gestionar cuentas, ingresos, gastos, categorías, etiquetas y divisas."""
+"""Lógica de negocio para gestionar cuentas, ingresos, gastos, categorías, etiquetas, divisas e inversiones.
+
+Incluye gestión inteligente de estado de conexión a internet para divisas e inversiones:
+- Cuando hay internet (`ONLINE`): actualiza tasas y precios en tiempo real desde Yahoo Finance y los guarda en caché.
+- Cuando no hay internet pero existe caché (`OFFLINE_CON_CACHE`): informa al usuario y utiliza la última cotización guardada.
+- Cuando no hay internet y no existe caché (`OFFLINE_SIN_CACHE`): informa al usuario que no tiene conexión y que se actualizará automáticamente apenas se conecte.
+"""
 
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.modelo.categoria import Categoria
 from app.modelo.cotizacion import Cotizacion
@@ -18,6 +24,7 @@ from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
 from app.servicio.servicio_bursatil import (
     ErrorConsultaBursatil,
+    ErrorSinConexionInternet,
     SIMBOLO_USD_COP,
     ServicioBursatil,
 )
@@ -27,6 +34,10 @@ MONEDAS_VALIDAS = CODIGOS_DIVISAS_ORDENADOS
 FRECUENCIAS_VALIDAS = ("DIARIO", "SEMANAL", "QUINCENAL", "MENSUAL", "ANUAL")
 PATRON_VALOR = re.compile(r"^\d+([.,]\d{1,2})?$")
 PATRON_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+ESTADO_CONEXION_ONLINE = "ONLINE"
+ESTADO_OFFLINE_CON_CACHE = "OFFLINE_CON_CACHE"
+ESTADO_OFFLINE_SIN_CACHE = "OFFLINE_SIN_CACHE"
 
 SIMBOLOS_VALIDOS = (
     "cash",
@@ -47,16 +58,16 @@ CATALOGO_SIMBOLOS_CATEGORIAS: Dict[str, List[Tuple[str, str]]] = {
     "Finanzas": [
         ("factura", "Factura / Recibo"),
         ("billetera", "Billetera / Ocio"),
-        ("cash", "Efectivo"),
-        ("banco", "Banco"),
+        ("cash", "Efectivo / Salario"),
+        ("banco", "Banco / Préstamo"),
         ("tarjeta_credito", "Tarjeta crédito"),
         ("tarjeta_debito", "Tarjeta débito"),
         ("impuestos", "Impuestos / %"),
-        ("grafico_subida", "Inversión / Ahorro"),
+        ("grafico_subida", "Intereses / Rendimiento"),
         ("calculadora_icono", "Presupuesto"),
-        ("puerquito", "Alcancía"),
+        ("puerquito", "Alcancía / Otros"),
         ("boveda", "Bóveda / Caja"),
-        ("moneda", "Moneda"),
+        ("moneda", "Moneda / Bono"),
     ],
     "Transporte": [
         ("carro", "Automóvil"),
@@ -76,7 +87,7 @@ CATALOGO_SIMBOLOS_CATEGORIAS: Dict[str, List[Tuple[str, str]]] = {
     ],
     "Compras": [
         ("mercado", "Supermercado"),
-        ("bolsa_compras", "Compras / Mall"),
+        ("bolsa_compras", "Ventas / Compras"),
         ("ropa", "Ropa / Moda"),
         ("zapatos", "Calzado / Zapatos"),
         ("regalo", "Regalos / Detalles"),
@@ -117,7 +128,7 @@ CATALOGO_SIMBOLOS_CATEGORIAS: Dict[str, List[Tuple[str, str]]] = {
         ("videojuegos", "Videojuegos / Consolas"),
         ("cine", "Cine / Streaming"),
         ("musica", "Música / Conciertos"),
-        ("computador", "Tecnología / PC"),
+        ("computador", "Tecnología / Freelance"),
         ("camara", "Fotografía / Hobby"),
     ],
     "Mascotas, Educación y Rutina": [
@@ -145,6 +156,16 @@ CATEGORIAS_GASTO_PREDETERMINADAS = (
     Categoria(None, "Alimentación", "GASTO", "mercado", "#7DC98F", True),
 )
 
+CATEGORIAS_INGRESO_PREDETERMINADAS = (
+    Categoria(None, "Salario", "INGRESO", "cash", "#7DC98F", True),
+    Categoria(None, "Regalo", "INGRESO", "regalo", "#E86F9A", True),
+    Categoria(None, "Intereses", "INGRESO", "grafico_subida", "#FBB718", True),
+    Categoria(None, "Préstamo", "INGRESO", "banco", "#408FD1", True),
+    Categoria(None, "Ventas", "INGRESO", "bolsa_compras", "#89BF50", True),
+    Categoria(None, "Bonificación", "INGRESO", "moneda", "#D98A4E", True),
+    Categoria(None, "Otros", "INGRESO", "puerquito", "#9B7EDE", True),
+)
+
 
 class ErrorValidacion(Exception):
     """Se lanza cuando los datos ingresados por el usuario no cumplen las reglas."""
@@ -167,6 +188,23 @@ def totales_cuentas_por_moneda(cuentas_con_saldo: Iterable[Tuple[Cuenta, Decimal
     return totales
 
 
+def _marcar_cotizacion_como_cache(cot: Cotizacion) -> Cotizacion:
+    """Devuelve una copia de la cotización indicando explícitamente que proviene del caché local."""
+    fuente_actual = cot.fuente or "Yahoo Finance"
+    if "Caché" not in fuente_actual:
+        fuente_nueva = "Caché local (Sin conexión)"
+    else:
+        fuente_nueva = fuente_actual
+    return Cotizacion(
+        id=cot.id,
+        simbolo=cot.simbolo,
+        fecha=cot.fecha,
+        precio=cot.precio,
+        moneda=cot.moneda,
+        fuente=fuente_nueva,
+    )
+
+
 class GestorFinanciero:
     """Coordina las validaciones, el acceso al repositorio y las consultas bursátiles en tiempo real."""
 
@@ -175,11 +213,152 @@ class GestorFinanciero:
         self._servicio_bursatil = servicio_bursatil or ServicioBursatil()
         self._cotizacion_usd_cop_memoria: Optional[Cotizacion] = None
         self._tasas_memoria: Dict[Tuple[str, str], Cotizacion] = {}
+        self._tasas_vivas_sesion: Dict[Tuple[str, str], Cotizacion] = {}
+        self._precios_inversion_memoria: Dict[str, Cotizacion] = {}
+        self._precios_inversion_vivos_sesion: Dict[str, Cotizacion] = {}
+        self._estado_conexion_api: str = ESTADO_CONEXION_ONLINE
+        self._ultima_cotizacion_usada: Optional[Cotizacion] = None
+        self._listeners_conexion: List[Callable[[], None]] = []
         self._monedas_recientes_memoria: List[str] = ["USD", "EUR", "MXN", "GBP"]
         self._categorias_memoria_extra: Dict[str, Categoria] = {
-            c.nombre: c for c in CATEGORIAS_GASTO_PREDETERMINADAS
+            c.nombre: c
+            for c in (
+                list(CATEGORIAS_GASTO_PREDETERMINADAS)
+                + list(CATEGORIAS_INGRESO_PREDETERMINADAS)
+            )
         }
         self._etiquetas_memoria_extra: Dict[str, Etiqueta] = {}
+
+    # ------------------------------------------------------------------
+    # Estado de conexión a internet, caché offline y notificaciones a la GUI
+    # ------------------------------------------------------------------
+    def registrar_listener_conexion(self, callback: Callable[[], None]) -> None:
+        if callback not in self._listeners_conexion:
+            self._listeners_conexion.append(callback)
+
+    def desregistrar_listener_conexion(self, callback: Callable[[], None]) -> None:
+        if callback in self._listeners_conexion:
+            self._listeners_conexion.remove(callback)
+
+    def _notificar_cambio_estado_conexion(self) -> None:
+        for cb in list(self._listeners_conexion):
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def hay_conexion_internet(self, usar_cache_breve: bool = False) -> bool:
+        """Verifica si hay acceso a internet a través del ServicioBursatil."""
+        if hasattr(self._servicio_bursatil, "hay_conexion_internet"):
+            return self._servicio_bursatil.hay_conexion_internet(
+                usar_cache_breve=usar_cache_breve
+            )
+        return True
+
+    def obtener_estado_conexion_bursatil(
+        self, moneda_referencia: str = "USD"
+    ) -> Dict[str, object]:
+        """Devuelve el diagnóstico actual de conectividad y caché para mostrar en la GUI."""
+        mon = (moneda_referencia or "USD").strip().upper()
+        if mon == "COP":
+            mon = "USD"
+
+        online = self.hay_conexion_internet(usar_cache_breve=True)
+        if online and self._estado_conexion_api == ESTADO_CONEXION_ONLINE:
+            return {
+                "online": True,
+                "estado": ESTADO_CONEXION_ONLINE,
+                "tiene_cache": True,
+                "cotizacion_cache": self._ultima_cotizacion_usada,
+                "mensaje": "",
+            }
+
+        cot_cache = self._buscar_cotizacion_en_cache(mon, "COP")
+        if cot_cache is None and self._ultima_cotizacion_usada is not None:
+            cot_cache = self._ultima_cotizacion_usada
+
+        if cot_cache is not None:
+            fecha_txt = cot_cache.fecha.isoformat()
+            precio_txt = f"{cot_cache.precio:,.2f}"
+            par_txt = f"1 {mon} = $ {precio_txt} COP"
+            mensaje = (
+                f"⚠️ Sin conexión a internet: no es posible actualizar los precios de divisas e inversiones. "
+                f"Mostrando información guardada en caché ({par_txt} del {fecha_txt}). "
+                f"Tan pronto como te conectes a internet, actualizaremos la información."
+            )
+            return {
+                "online": False,
+                "estado": ESTADO_OFFLINE_CON_CACHE,
+                "tiene_cache": True,
+                "cotizacion_cache": cot_cache,
+                "mensaje": mensaje,
+            }
+
+        mensaje_sin_cache = (
+            "📡 No tienes conexión a internet y no hay información guardada en caché. "
+            "Tan pronto como te conectes a internet, actualizaremos los precios de divisas e inversiones automáticamente."
+        )
+        return {
+            "online": False,
+            "estado": ESTADO_OFFLINE_SIN_CACHE,
+            "tiene_cache": False,
+            "cotizacion_cache": None,
+            "mensaje": mensaje_sin_cache,
+        }
+
+    def _buscar_cotizacion_en_cache(
+        self, origen: str, destino: str
+    ) -> Optional[Cotizacion]:
+        """Busca una tasa de cambio guardada en memoria o en la base de datos local,
+        incluyendo búsqueda directa, inversa y triangulación vía USD si existe en caché."""
+        par = (origen, destino)
+        simbolo_par = f"{origen}{destino}=X"
+
+        if par in self._tasas_memoria:
+            return _marcar_cotizacion_como_cache(self._tasas_memoria[par])
+
+        if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+            # 1) Búsqueda directa (ej. USDCOP=X, EURCOP=X)
+            guardada = self._repositorio.obtener_ultima_cotizacion(simbolo_par)
+            if guardada is not None and guardada.precio > Decimal("0"):
+                cot_cache = _marcar_cotizacion_como_cache(guardada)
+                self._tasas_memoria[par] = cot_cache
+                return cot_cache
+
+            # 2) Búsqueda por ticker corto si el origen es USD (ej. COP=X o BGN=X)
+            if origen == "USD":
+                guardada_corta = self._repositorio.obtener_ultima_cotizacion(f"{destino}=X")
+                if guardada_corta is not None and guardada_corta.precio > Decimal("0"):
+                    cot_cache = Cotizacion(
+                        id=guardada_corta.id,
+                        simbolo=simbolo_par,
+                        fecha=guardada_corta.fecha,
+                        precio=guardada_corta.precio,
+                        moneda=destino,
+                        fuente="Caché local (Sin conexión)",
+                    )
+                    self._tasas_memoria[par] = cot_cache
+                    return cot_cache
+
+            # 3) Búsqueda inversa (ej. si piden COP -> USD y está guardada USDCOP=X)
+            simbolo_inv = f"{destino}{origen}=X"
+            guardada_inv = self._repositorio.obtener_ultima_cotizacion(simbolo_inv)
+            if guardada_inv is not None and guardada_inv.precio > Decimal("0"):
+                tasa_inv = (Decimal("1") / guardada_inv.precio).quantize(
+                    Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                )
+                cot_cache = Cotizacion(
+                    id=guardada_inv.id,
+                    simbolo=simbolo_par,
+                    fecha=guardada_inv.fecha,
+                    precio=tasa_inv,
+                    moneda=destino,
+                    fuente="Caché local (Sin conexión)",
+                )
+                self._tasas_memoria[par] = cot_cache
+                return cot_cache
+
+        return None
 
     # ------------------------------------------------------------------
     # Historial de las últimas 5 divisas usadas y Selector Mundial
@@ -220,14 +399,11 @@ class GestorFinanciero:
         return combinadas
 
     def obtener_opciones_selector_divisas(self) -> List[str]:
-        """Devuelve la lista completa para cualquier desplegable de moneda:
-        1) Primero COP + las 4 últimas divisas usadas.
-        2) Luego todas las divisas del mundo en orden alfabético (A-Z)."""
         ultimas_5 = self.obtener_ultimas_5_monedas()
         return construir_lista_selector_divisas(ultimas_5[1:])
 
     # ------------------------------------------------------------------
-    # Conversión en tiempo real entre cualquier par de divisas (Yahoo Finance)
+    # Conversión en tiempo real entre cualquier par de divisas (Yahoo Finance) + Caché Offline
     # ------------------------------------------------------------------
     def obtener_tasa_cambio(
         self,
@@ -248,35 +424,48 @@ class GestorFinanciero:
             )
 
         par = (origen, destino)
-        simbolo_par = f"{origen}{destino}=X"
 
-        if not forzar_actualizacion:
-            if par in self._tasas_memoria:
-                return self._tasas_memoria[par]
-            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
-                guardada = self._repositorio.obtener_ultima_cotizacion(simbolo_par)
-                if guardada is not None and (
-                    guardada.precio >= Decimal("0.01")
-                    or guardada.precio.as_tuple().exponent <= -6
-                ):
-                    self._tasas_memoria[par] = guardada
-                    return guardada
+        # Si ya se obtuvo en vivo en esta sesión y sigue habiendo conexión, reutilizar sin latencia
+        if (
+            not forzar_actualizacion
+            and par in self._tasas_vivas_sesion
+            and self.hay_conexion_internet(usar_cache_breve=True)
+        ):
+            cot_viva = self._tasas_vivas_sesion[par]
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = cot_viva
+            return cot_viva
 
         try:
             nueva = self._servicio_bursatil.consultar_tasa_cambio(origen, destino)
             if hasattr(self._repositorio, "guardar_cotizaciones"):
-                guardadas = self._repositorio.guardar_cotizaciones([nueva])
-                if guardadas:
-                    nueva = guardadas[0]
+                try:
+                    guardadas = self._repositorio.guardar_cotizaciones([nueva])
+                    if guardadas:
+                        nueva = guardadas[0]
+                except Exception:
+                    pass
+            self._tasas_vivas_sesion[par] = nueva
             self._tasas_memoria[par] = nueva
             if par == ("USD", "COP"):
                 self._cotizacion_usd_cop_memoria = nueva
+            cambio_estado = self._estado_conexion_api != ESTADO_CONEXION_ONLINE
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = nueva
+            if cambio_estado:
+                self._notificar_cambio_estado_conexion()
             return nueva
-        except ErrorConsultaBursatil:
-            if par in self._tasas_memoria:
-                return self._tasas_memoria[par]
-            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
-                return self._repositorio.obtener_ultima_cotizacion(simbolo_par)
+        except (ErrorSinConexionInternet, ErrorConsultaBursatil):
+            cot_cache = self._buscar_cotizacion_en_cache(origen, destino)
+            if cot_cache is not None:
+                self._estado_conexion_api = ESTADO_OFFLINE_CON_CACHE
+                self._ultima_cotizacion_usada = cot_cache
+                self._notificar_cambio_estado_conexion()
+                return cot_cache
+
+            self._estado_conexion_api = ESTADO_OFFLINE_SIN_CACHE
+            self._ultima_cotizacion_usada = None
+            self._notificar_cambio_estado_conexion()
             return None
 
     def convertir_entre_monedas(
@@ -314,29 +503,103 @@ class GestorFinanciero:
         )
 
     def obtener_tasa_usd_cop(self, forzar_actualizacion: bool = False) -> Optional[Cotizacion]:
-        if not forzar_actualizacion:
-            if self._cotizacion_usd_cop_memoria is not None:
-                return self._cotizacion_usd_cop_memoria
-            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
-                guardada = self._repositorio.obtener_ultima_cotizacion(SIMBOLO_USD_COP)
-                if guardada is not None:
-                    self._cotizacion_usd_cop_memoria = guardada
-                    return guardada
+        par = ("USD", "COP")
+        if (
+            not forzar_actualizacion
+            and par in self._tasas_vivas_sesion
+            and self.hay_conexion_internet(usar_cache_breve=True)
+        ):
+            cot_viva = self._tasas_vivas_sesion[par]
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = cot_viva
+            return cot_viva
 
         try:
             nueva = self._servicio_bursatil.consultar_tasa_usd_cop()
             if hasattr(self._repositorio, "guardar_cotizaciones"):
-                guardadas = self._repositorio.guardar_cotizaciones([nueva])
-                if guardadas:
-                    nueva = guardadas[0]
+                try:
+                    guardadas = self._repositorio.guardar_cotizaciones([nueva])
+                    if guardadas:
+                        nueva = guardadas[0]
+                except Exception:
+                    pass
             self._cotizacion_usd_cop_memoria = nueva
-            self._tasas_memoria[("USD", "COP")] = nueva
+            self._tasas_vivas_sesion[par] = nueva
+            self._tasas_memoria[par] = nueva
+            cambio_estado = self._estado_conexion_api != ESTADO_CONEXION_ONLINE
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = nueva
+            if cambio_estado:
+                self._notificar_cambio_estado_conexion()
             return nueva
-        except ErrorConsultaBursatil:
-            if self._cotizacion_usd_cop_memoria is not None:
-                return self._cotizacion_usd_cop_memoria
-            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
-                return self._repositorio.obtener_ultima_cotizacion(SIMBOLO_USD_COP)
+        except (ErrorSinConexionInternet, ErrorConsultaBursatil):
+            cot_cache = self._buscar_cotizacion_en_cache("USD", "COP")
+            if cot_cache is None and self._cotizacion_usd_cop_memoria is not None:
+                cot_cache = _marcar_cotizacion_como_cache(self._cotizacion_usd_cop_memoria)
+            if cot_cache is not None:
+                self._cotizacion_usd_cop_memoria = cot_cache
+                self._estado_conexion_api = ESTADO_OFFLINE_CON_CACHE
+                self._ultima_cotizacion_usada = cot_cache
+                self._notificar_cambio_estado_conexion()
+                return cot_cache
+
+            self._estado_conexion_api = ESTADO_OFFLINE_SIN_CACHE
+            self._ultima_cotizacion_usada = None
+            self._notificar_cambio_estado_conexion()
+            return None
+
+    def consultar_precio_inversion(
+        self,
+        simbolo: str,
+        moneda_esperada: str = "USD",
+        forzar_actualizacion: bool = False,
+    ) -> Optional[Cotizacion]:
+        """Consulta el precio en tiempo real de un activo de inversión (ej. 'VOO', 'AAPL')
+        y si no hay conexión a internet devuelve el precio guardado en caché (o None si no hay caché),
+        actualizando el estado de conexión para informar al usuario."""
+        simbolo_limpio = simbolo.strip().upper()
+        if (
+            not forzar_actualizacion
+            and simbolo_limpio in self._precios_inversion_vivos_sesion
+            and self.hay_conexion_internet(usar_cache_breve=True)
+        ):
+            cot_viva = self._precios_inversion_vivos_sesion[simbolo_limpio]
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = cot_viva
+            return cot_viva
+
+        try:
+            nueva = self._servicio_bursatil.consultar_precio_actual(
+                simbolo_limpio, moneda_esperada=moneda_esperada
+            )
+            if hasattr(self._repositorio, "guardar_cotizaciones"):
+                try:
+                    guardadas = self._repositorio.guardar_cotizaciones([nueva])
+                    if guardadas:
+                        nueva = guardadas[0]
+                except Exception:
+                    pass
+            self._precios_inversion_vivos_sesion[simbolo_limpio] = nueva
+            self._precios_inversion_memoria[simbolo_limpio] = nueva
+            self._estado_conexion_api = ESTADO_CONEXION_ONLINE
+            self._ultima_cotizacion_usada = nueva
+            self._notificar_cambio_estado_conexion()
+            return nueva
+        except (ErrorSinConexionInternet, ErrorConsultaBursatil):
+            cot_cache = self._precios_inversion_memoria.get(simbolo_limpio)
+            if cot_cache is None and hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                cot_cache = self._repositorio.obtener_ultima_cotizacion(simbolo_limpio)
+            if cot_cache is not None:
+                cot_cache = _marcar_cotizacion_como_cache(cot_cache)
+                self._precios_inversion_memoria[simbolo_limpio] = cot_cache
+                self._estado_conexion_api = ESTADO_OFFLINE_CON_CACHE
+                self._ultima_cotizacion_usada = cot_cache
+                self._notificar_cambio_estado_conexion()
+                return cot_cache
+
+            self._estado_conexion_api = ESTADO_OFFLINE_SIN_CACHE
+            self._ultima_cotizacion_usada = None
+            self._notificar_cambio_estado_conexion()
             return None
 
     def convertir_usd_a_cop(self, monto_usd: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
@@ -371,8 +634,6 @@ class GestorFinanciero:
         moneda_objetivo: str = "COP",
         incluir_todas_convertidas: bool = False,
     ) -> Dict[str, object]:
-        """Calcula {'ingresos': Decimal, 'gastos': Decimal, 'gastos_por_categoria': {cat: Decimal}}
-        para cualquier rango de fechas (Día, Semana, Mes, Trimestre/Quarter, Año, YTD o Personalizado)."""
         if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
             raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
 
@@ -393,7 +654,10 @@ class GestorFinanciero:
             if mov.moneda == moneda_dest:
                 monto = mov.valor
             else:
-                monto = self.convertir_entre_monedas(mov.valor, mov.moneda, moneda_dest)
+                try:
+                    monto = self.convertir_entre_monedas(mov.valor, mov.moneda, moneda_dest)
+                except ErrorValidacion:
+                    continue
 
             if mov.tipo_movimiento == "INGRESO":
                 total_ingresos += monto
@@ -443,15 +707,18 @@ class GestorFinanciero:
             gas_orig: Decimal = datos["gastos"]  # type: ignore[assignment]
             cats_orig: Dict[str, Decimal] = datos["gastos_por_categoria"]  # type: ignore[assignment]
 
-            if ing_orig > Decimal("0"):
-                total_ingresos += self.convertir_entre_monedas(ing_orig, mon_orig, moneda_dest)
-            if gas_orig > Decimal("0"):
-                total_gastos += self.convertir_entre_monedas(gas_orig, mon_orig, moneda_dest)
-            for cat_nombre, monto_cat in cats_orig.items():
-                monto_conv = self.convertir_entre_monedas(monto_cat, mon_orig, moneda_dest)
-                gastos_cat_unificados[cat_nombre] = (
-                    gastos_cat_unificados.get(cat_nombre, Decimal("0")) + monto_conv
-                )
+            try:
+                if ing_orig > Decimal("0"):
+                    total_ingresos += self.convertir_entre_monedas(ing_orig, mon_orig, moneda_dest)
+                if gas_orig > Decimal("0"):
+                    total_gastos += self.convertir_entre_monedas(gas_orig, mon_orig, moneda_dest)
+                for cat_nombre, monto_cat in cats_orig.items():
+                    monto_conv = self.convertir_entre_monedas(monto_cat, mon_orig, moneda_dest)
+                    gastos_cat_unificados[cat_nombre] = (
+                        gastos_cat_unificados.get(cat_nombre, Decimal("0")) + monto_conv
+                    )
+            except ErrorValidacion:
+                continue
 
         return {
             "ingresos": total_ingresos,
@@ -459,18 +726,21 @@ class GestorFinanciero:
             "gastos_por_categoria": gastos_cat_unificados,
         }
 
-    def resumen_gastos_periodo(
+    def _resumen_movimientos_periodo(
         self,
+        tipo: str,
         fecha_inicio: Optional[date] = None,
         fecha_fin: Optional[date] = None,
         moneda_objetivo: Optional[str] = None,
         incluir_todas_convertidas: bool = False,
+        color_defecto: str = "#FBB718",
+        simbolo_defecto: str = "mercado",
     ) -> Dict[str, Dict[str, object]]:
         if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
             raise ErrorValidacion("La fecha final no puede ser anterior a la fecha inicial.")
 
-        mapa_cat = {c.nombre: c for c in self.obtener_categorias_detalladas("GASTO")}
-        gastos = self.obtener_movimientos("GASTO", fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+        mapa_cat = {c.nombre: c for c in self.obtener_categorias_detalladas(tipo)}
+        movimientos = self.obtener_movimientos(tipo, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
 
         if moneda_objetivo and incluir_todas_convertidas:
             mon_dest = self._validar_moneda(moneda_objetivo)
@@ -481,36 +751,73 @@ class GestorFinanciero:
                 "colores": {},
                 "simbolos": {},
             }
-            for g in gastos:
-                valor_conv = self.convertir_entre_monedas(g.valor, g.moneda, mon_dest)
+            for m in movimientos:
+                try:
+                    valor_conv = self.convertir_entre_monedas(m.valor, m.moneda, mon_dest)
+                except ErrorValidacion:
+                    continue
                 datos_unificados["total"] = datos_unificados["total"] + valor_conv  # type: ignore[operator]
                 por_cat: Dict[str, Decimal] = datos_unificados["por_categoria"]  # type: ignore[assignment]
-                por_cat[g.categoria] = por_cat.get(g.categoria, Decimal("0")) + valor_conv
+                por_cat[m.categoria] = por_cat.get(m.categoria, Decimal("0")) + valor_conv
 
-                cat_info = mapa_cat.get(g.categoria)
+                cat_info = mapa_cat.get(m.categoria)
                 colores: Dict[str, str] = datos_unificados["colores"]  # type: ignore[assignment]
                 simbolos: Dict[str, str] = datos_unificados["simbolos"]  # type: ignore[assignment]
-                colores[g.categoria] = cat_info.color if cat_info else "#FBB718"
-                simbolos[g.categoria] = cat_info.simbolo if cat_info else "mercado"
-            return {mon_dest: datos_unificados} if gastos else {}
+                colores[m.categoria] = cat_info.color if cat_info else color_defecto
+                simbolos[m.categoria] = cat_info.simbolo if cat_info else simbolo_defecto
+            return {mon_dest: datos_unificados} if movimientos else {}
 
         resumen: Dict[str, Dict[str, object]] = {}
-        for g in gastos:
+        for m in movimientos:
             datos_moneda = resumen.setdefault(
-                g.moneda,
+                m.moneda,
                 {"total": Decimal("0"), "por_categoria": {}, "colores": {}, "simbolos": {}},
             )
-            datos_moneda["total"] = datos_moneda["total"] + g.valor
+            datos_moneda["total"] = datos_moneda["total"] + m.valor
             por_cat = datos_moneda["por_categoria"]  # type: ignore[assignment]
-            por_cat[g.categoria] = por_cat.get(g.categoria, Decimal("0")) + g.valor
+            por_cat[m.categoria] = por_cat.get(m.categoria, Decimal("0")) + m.valor
 
-            cat_info = mapa_cat.get(g.categoria)
+            cat_info = mapa_cat.get(m.categoria)
             colores = datos_moneda["colores"]  # type: ignore[assignment]
             simbolos = datos_moneda["simbolos"]  # type: ignore[assignment]
-            colores[g.categoria] = cat_info.color if cat_info else "#FBB718"
-            simbolos[g.categoria] = cat_info.simbolo if cat_info else "mercado"
+            colores[m.categoria] = cat_info.color if cat_info else color_defecto
+            simbolos[m.categoria] = cat_info.simbolo if cat_info else simbolo_defecto
 
         return resumen
+
+    def resumen_gastos_periodo(
+        self,
+        fecha_inicio: Optional[date] = None,
+        fecha_fin: Optional[date] = None,
+        moneda_objetivo: Optional[str] = None,
+        incluir_todas_convertidas: bool = False,
+    ) -> Dict[str, Dict[str, object]]:
+        return self._resumen_movimientos_periodo(
+            tipo="GASTO",
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            moneda_objetivo=moneda_objetivo,
+            incluir_todas_convertidas=incluir_todas_convertidas,
+            color_defecto="#FBB718",
+            simbolo_defecto="mercado",
+        )
+
+    def resumen_ingresos_periodo(
+        self,
+        fecha_inicio: Optional[date] = None,
+        fecha_fin: Optional[date] = None,
+        moneda_objetivo: Optional[str] = None,
+        incluir_todas_convertidas: bool = False,
+    ) -> Dict[str, Dict[str, object]]:
+        return self._resumen_movimientos_periodo(
+            tipo="INGRESO",
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            moneda_objetivo=moneda_objetivo,
+            incluir_todas_convertidas=incluir_todas_convertidas,
+            color_defecto="#7DC98F",
+            simbolo_defecto="cash",
+        )
 
     def calcular_total_cuentas_en_moneda(
         self,
@@ -527,18 +834,36 @@ class GestorFinanciero:
             if cuenta.moneda == mon_dest:
                 total += saldo
             elif incluir_todas_convertidas:
-                total += self.convertir_entre_monedas(saldo, cuenta.moneda, mon_dest)
+                try:
+                    total += self.convertir_entre_monedas(saldo, cuenta.moneda, mon_dest)
+                except ErrorValidacion:
+                    continue
         return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
-    # Categorías (compatibilidad total + creación customizada)
+    # Categorías (compatibilidad total + creación customizada para GASTO e INGRESO)
     # ------------------------------------------------------------------
     def obtener_categorias(self) -> List[str]:
         return self._repositorio.obtener_categorias()
 
     def obtener_categorias_detalladas(self, tipo: Optional[str] = "GASTO") -> List[Categoria]:
+        predeterminadas = (
+            CATEGORIAS_INGRESO_PREDETERMINADAS
+            if (tipo and tipo.upper() == "INGRESO")
+            else CATEGORIAS_GASTO_PREDETERMINADAS
+        )
+
         if hasattr(self._repositorio, "obtener_categorias_detalladas"):
             categorias = self._repositorio.obtener_categorias_detalladas(tipo=tipo)
+            nombres_actuales = {c.nombre for c in categorias}
+            if tipo and tipo.upper() == "INGRESO":
+                for cat_p in predeterminadas:
+                    if cat_p.nombre not in nombres_actuales and hasattr(self._repositorio, "insertar_categoria"):
+                        try:
+                            insertada = self._repositorio.insertar_categoria(cat_p)
+                            categorias.append(insertada)
+                        except Exception:
+                            categorias.append(cat_p)
             if categorias:
                 return categorias
 
@@ -546,7 +871,7 @@ class GestorFinanciero:
         resultado: List[Categoria] = []
         vistos = set()
 
-        for cat_pred in CATEGORIAS_GASTO_PREDETERMINADAS:
+        for cat_pred in predeterminadas:
             if tipo is None or cat_pred.tipo == tipo.upper():
                 resultado.append(cat_pred)
                 vistos.add(cat_pred.nombre)
@@ -557,9 +882,9 @@ class GestorFinanciero:
                 vistos.add(nombre)
 
         for nombre in nombres_repo:
-            if nombre not in vistos:
+            if nombre not in vistos and tipo is None:
                 resultado.append(
-                    Categoria(None, nombre, tipo or "GASTO", "mercado", "#FBB718", False)
+                    Categoria(None, nombre, "GASTO", "mercado", "#FBB718", False)
                 )
                 vistos.add(nombre)
         return resultado
@@ -588,7 +913,7 @@ class GestorFinanciero:
         if gasto_programado:
             frec = (frecuencia or "MENSUAL").strip().upper()
             if frec not in FRECUENCIAS_VALIDAS:
-                raise ErrorValidacion("La frecuencia del gasto programado no es válida.")
+                raise ErrorValidacion("La frecuencia programada no es válida.")
             frecuencia_limpia = frec
 
         nueva = Categoria(
@@ -640,7 +965,7 @@ class GestorFinanciero:
         return guardada
 
     # ------------------------------------------------------------------
-    # Movimientos y Gastos
+    # Movimientos, Gastos e Ingresos
     # ------------------------------------------------------------------
     def registrar_movimiento(
         self,
@@ -736,6 +1061,43 @@ class GestorFinanciero:
             frecuencia=frecuencia,
         )
 
+    def registrar_ingreso(
+        self,
+        valor_texto: str,
+        moneda: str = "COP",
+        cuenta_id: Optional[int] = None,
+        categoria: str = "Salario",
+        fecha_texto: Optional[str] = None,
+        etiquetas: Optional[Sequence[str]] = None,
+        comentario: Optional[str] = None,
+        imagen: Optional[str] = None,
+        es_programado: bool = False,
+        frecuencia: Optional[str] = None,
+    ) -> MovimientoFinanciero:
+        """Registra un ingreso con COP por defecto y suma automáticamente al saldo de la cuenta asociada."""
+        fecha_str = fecha_texto if fecha_texto is not None else date.today().isoformat()
+        categorias_actuales = self._repositorio.obtener_categorias()
+        if categoria in self._categorias_memoria_extra and categoria not in categorias_actuales:
+            cat_obj = self._categorias_memoria_extra[categoria]
+            if hasattr(self._repositorio, "insertar_categoria"):
+                self._repositorio.insertar_categoria(cat_obj)
+            elif hasattr(self._repositorio, "_categorias"):
+                self._repositorio._categorias.append(categoria)
+
+        return self.registrar_movimiento(
+            tipo="INGRESO",
+            fecha_texto=fecha_str,
+            valor_texto=valor_texto,
+            moneda=moneda,
+            categoria=categoria,
+            descripcion=comentario,
+            cuenta_id=cuenta_id,
+            etiquetas=etiquetas,
+            imagen=imagen,
+            es_programado=es_programado,
+            frecuencia=frecuencia,
+        )
+
     def obtener_movimientos(
         self,
         tipo: Optional[str] = None,
@@ -760,6 +1122,12 @@ class GestorFinanciero:
             return self._repositorio.obtener_ultima_fecha_movimiento("GASTO")
         gastos = self.obtener_movimientos("GASTO")
         return gastos[0].fecha if gastos else None
+
+    def obtener_ultima_fecha_ingreso(self) -> Optional[date]:
+        if hasattr(self._repositorio, "obtener_ultima_fecha_movimiento"):
+            return self._repositorio.obtener_ultima_fecha_movimiento("INGRESO")
+        ingresos = self.obtener_movimientos("INGRESO")
+        return ingresos[0].fecha if ingresos else None
 
     def resumen_del_mes(self, anno: int, mes: int) -> Dict[str, Dict[str, object]]:
         if not isinstance(anno, int) or isinstance(anno, bool) or anno < 1900 or anno > 9999:

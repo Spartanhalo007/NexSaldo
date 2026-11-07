@@ -10,6 +10,7 @@ from app.gui.adaptadores_moneda import (
 )
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
 from app.gui.vista_gastos import VistaGastos
+from app.gui.vista_ingresos import VistaIngresos
 from app.gui.vista_resumen import VistaResumen
 
 RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
@@ -18,7 +19,7 @@ NAVEGACION = [
     ("Resumen", "resumen"),
     ("Cuentas", "cuentas"),
     ("Gastos", "gastos"),
-    ("Ingresos", "movimientos"),
+    ("Ingresos", "ingresos"),
     ("Inversiones", "pendiente"),
     ("Reportes", "pendiente"),
     ("Categorías", "pendiente"),
@@ -146,6 +147,8 @@ class VentanaPrincipal(ctk.CTk):
             self._mostrar_cuentas()
         elif modulo == "gastos":
             self._mostrar_gastos()
+        elif modulo == "ingresos":
+            self._mostrar_ingresos()
         elif modulo == "movimientos":
             filtro = "GASTO" if texto == "Gastos" else "INGRESO"
             self._mostrar_movimientos(filtro_tipo=filtro, titulo=texto)
@@ -171,6 +174,11 @@ class VentanaPrincipal(ctk.CTk):
     def _mostrar_gastos(self):
         self._limpiar_area()
         self._vista_actual = VistaGastos(self._area, self._gestor)
+        self._vista_actual.pack(fill="both", expand=True)
+
+    def _mostrar_ingresos(self):
+        self._limpiar_area()
+        self._vista_actual = VistaIngresos(self._area, self._gestor)
         self._vista_actual.pack(fill="both", expand=True)
 
     def _mostrar_movimientos(self, filtro_tipo, titulo):

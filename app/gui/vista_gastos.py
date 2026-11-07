@@ -1,16 +1,20 @@
-"""Vista principal del Módulo de Gastos para NexSaldo con filtro de todas las divisas del mundo
-(COP + 4 últimas usadas + lista A-Z) y modo 'Solo esta moneda' vs 'Todo convertido'."""
+"""Vista principal del Módulo de Gastos para NexSaldo con selector de periodo estilo Shopify
+(`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`) y filtro de todas las divisas del mundo."""
 
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 import tkinter as tk
 from tkinter import messagebox
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 import customtkinter as ctk
 
 from app.gestor.gestor_financiero import GestorFinanciero
-from app.gui.calendario import SelectorCalendario
 from app.gui.dialogo_gasto import DialogoGasto
+from app.gui.dialogo_periodo_shopify import (
+    DialogoPeriodoShopify,
+    calcular_rango_preset,
+    desplazar_rango,
+)
 from app.gui.estilos import COLORES, COLORES_GRAFICA, FUENTE
 from app.gui.formato import fecha_legible, formatear_valor
 from app.gui.iconos import icono_ctk
@@ -18,22 +22,25 @@ from app.gui.selector_moneda import BarraFiltroMoneda
 
 TAMANO_DONA = 240
 GROSOR_DONA = 34
-OPCIONES_PERIODO = ("Día", "Semana", "Mes", "Año", "Periodo")
 
 
 class VistaGastos(ctk.CTkFrame):
-    """Muestra la gráfica circular de gastos por periodo (Día, Semana, Mes, Año, Periodo),
-    el filtro mundial de divisas ('Solo esta moneda' o 'Todo convertido'),
-    el botón amarillo 'Añadir gasto', el desglose por categorías y la lista de gastos."""
+    """Muestra la gráfica circular de gastos por periodo usando el selector clicable estilo Shopify
+    (Hoy/Día, Semana, Mes, Quarter, Año, YTD, Periodo personalizado), el filtro mundial de divisas
+    ('Solo esta moneda' o 'Todo convertido'), el botón amarillo 'Añadir gasto', el desglose por
+    categorías y la lista de gastos."""
 
     def __init__(self, master, gestor: GestorFinanciero, **kwargs):
         super().__init__(master, fg_color=COLORES["fondo_contenido"], **kwargs)
         self._gestor = gestor
-        self._filtro_actual = "Mes"
+
+        hoy = date.today()
+        self._preset_periodo = "ESTE_MES"
+        self._fecha_inicio, self._fecha_fin, self._texto_periodo = calcular_rango_preset(
+            "ESTE_MES", referencia=hoy
+        )
         self._moneda_grafica = "COP"  # COP siempre por defecto
         self._incluir_todas_convertidas = False
-        self._fecha_desde: Optional[date] = None
-        self._fecha_hasta: Optional[date] = None
 
         self._construir_interfaz()
         self._refrescar_vista()
@@ -43,7 +50,7 @@ class VistaGastos(ctk.CTkFrame):
         contenedor.pack(fill="both", expand=True, padx=24, pady=18)
 
         # ==================================================================
-        # 1. CABECERA Y BOTÓN AMARILLO "Añadir gasto"
+        # 1. CABECERA, SELECTOR DE PERIODO ESTILO SHOPIFY Y BOTÓN AMARILLO "Añadir gasto"
         # ==================================================================
         fila_superior = ctk.CTkFrame(contenedor, fg_color="transparent")
         fila_superior.pack(fill="x", pady=(0, 10))
@@ -68,11 +75,58 @@ class VistaGastos(ctk.CTkFrame):
             command=self._abrir_dialogo_anadir_gasto,
         ).pack(side="right")
 
-        # Barra de Moneda Mundial (COP + 4 últimas + Todas A-Z) y Modo (Solo esta moneda / Todo convertido)
+        # Selector clicable estilo Shopify: ◀ [ 📅 Noviembre de 2026 ▾ ] ▶
+        marco_periodo = ctk.CTkFrame(fila_superior, fg_color="transparent")
+        marco_periodo.pack(side="right", padx=(0, 14))
+
+        ctk.CTkButton(
+            marco_periodo,
+            text="◀",
+            width=34,
+            height=36,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            command=lambda: self._desplazar_periodo(-1),
+        ).pack(side="left", padx=4)
+
+        self._boton_periodo = ctk.CTkButton(
+            marco_periodo,
+            text=f"📅  {self._texto_periodo}  ▾",
+            height=36,
+            corner_radius=8,
+            fg_color=COLORES["fondo_tarjeta"],
+            hover_color=COLORES["boton_lateral"],
+            border_width=1,
+            border_color=COLORES["acento"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 13, "bold"),
+            command=self._abrir_selector_periodo_shopify,
+        )
+        self._boton_periodo.pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            marco_periodo,
+            text="▶",
+            width=34,
+            height=36,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            command=lambda: self._desplazar_periodo(1),
+        ).pack(side="left", padx=4)
+
+        # ==================================================================
+        # 2. BARRA DE MONEDA MUNDIAL (COP + 4 últimas + Todas A-Z) Y MODO
+        # ==================================================================
         marco_moneda = ctk.CTkFrame(
             contenedor, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
         )
-        marco_moneda.pack(fill="x", pady=(0, 12))
+        marco_moneda.pack(fill="x", pady=(0, 16))
 
         fila_barra_moneda = ctk.CTkFrame(marco_moneda, fg_color="transparent")
         fila_barra_moneda.pack(fill="x", padx=16, pady=10)
@@ -85,82 +139,6 @@ class VistaGastos(ctk.CTkFrame):
             mostrar_modo=True,
         )
         self._barra_moneda.pack(side="left")
-
-        # ==================================================================
-        # 2. FILTROS DE PERIODO: Día, Semana, Mes, Año, Periodo (Calendario)
-        # ==================================================================
-        marco_filtros = ctk.CTkFrame(
-            contenedor, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
-        )
-        marco_filtros.pack(fill="x", pady=(0, 16))
-
-        fila_radios = ctk.CTkFrame(marco_filtros, fg_color="transparent")
-        fila_radios.pack(fill="x", padx=16, pady=12)
-
-        ctk.CTkLabel(
-            fila_radios,
-            text="Periodo de consulta:",
-            font=(FUENTE, 13, "bold"),
-            text_color=COLORES["texto"],
-        ).pack(side="left", padx=(0, 14))
-
-        self._var_filtro = ctk.StringVar(value="Mes")
-        for opcion in OPCIONES_PERIODO:
-            ctk.CTkRadioButton(
-                fila_radios,
-                text=opcion,
-                variable=self._var_filtro,
-                value=opcion,
-                font=(FUENTE, 13, "bold"),
-                text_color=COLORES["texto"],
-                fg_color=COLORES["acento"],
-                hover_color=COLORES["acento_hover"],
-                command=self._al_cambiar_filtro,
-            ).pack(side="left", padx=10)
-
-        self._marco_periodo = ctk.CTkFrame(marco_filtros, fg_color="transparent")
-
-        ctk.CTkLabel(
-            self._marco_periodo,
-            text="Desde:",
-            font=(FUENTE, 12, "bold"),
-            text_color=COLORES["texto_secundario"],
-        ).pack(side="left", padx=(16, 6))
-
-        self._boton_desde = ctk.CTkButton(
-            self._marco_periodo,
-            text="Seleccionar inicio",
-            width=145,
-            height=32,
-            corner_radius=8,
-            fg_color=COLORES["boton_lateral"],
-            hover_color=COLORES["hover_lateral"],
-            text_color=COLORES["texto"],
-            font=(FUENTE, 12, "bold"),
-            command=self._elegir_fecha_inicio,
-        )
-        self._boton_desde.pack(side="left", padx=(0, 14))
-
-        ctk.CTkLabel(
-            self._marco_periodo,
-            text="Hasta:",
-            font=(FUENTE, 12, "bold"),
-            text_color=COLORES["texto_secundario"],
-        ).pack(side="left", padx=(0, 6))
-
-        self._boton_hasta = ctk.CTkButton(
-            self._marco_periodo,
-            text="Seleccionar fin",
-            width=145,
-            height=32,
-            corner_radius=8,
-            fg_color=COLORES["boton_lateral"],
-            hover_color=COLORES["hover_lateral"],
-            text_color=COLORES["texto"],
-            font=(FUENTE, 12, "bold"),
-            command=self._elegir_fecha_final,
-        )
-        self._boton_hasta.pack(side="left")
 
         # ==================================================================
         # 3. PANEL CENTRAL: GRÁFICA CIRCULAR + DESGLOSE POR CATEGORÍAS
@@ -177,7 +155,7 @@ class VistaGastos(ctk.CTkFrame):
 
         self._titulo_rango = ctk.CTkLabel(
             tarjeta_dona,
-            text="Gastos de este mes",
+            text=f"Gastos · {self._texto_periodo}",
             font=(FUENTE, 15, "bold"),
             text_color=COLORES["texto"],
         )
@@ -230,97 +208,56 @@ class VistaGastos(ctk.CTkFrame):
         self._contenedor_historial.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
     # ------------------------------------------------------------------
-    # Manejo de Moneda, Modo y Periodo
+    # Manejo del Selector de Periodo estilo Shopify y Moneda
     # ------------------------------------------------------------------
+    def _abrir_selector_periodo_shopify(self):
+        DialogoPeriodoShopify(
+            self,
+            fecha_inicio=self._fecha_inicio,
+            fecha_fin=self._fecha_fin,
+            preset_inicial=self._preset_periodo,
+            al_aplicar=self._al_aplicar_periodo_shopify,
+        )
+
+    def _al_aplicar_periodo_shopify(
+        self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
+    ):
+        self._fecha_inicio = fecha_ini
+        self._fecha_fin = fecha_fin
+        self._preset_periodo = preset
+        self._texto_periodo = etiqueta
+        self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+        self._refrescar_vista()
+
+    def _desplazar_periodo(self, direccion: int):
+        ini, fin, etiqueta = desplazar_rango(
+            self._preset_periodo, self._fecha_inicio, self._fecha_fin, direccion
+        )
+        self._fecha_inicio = ini
+        self._fecha_fin = fin
+        self._texto_periodo = etiqueta
+        self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+        self._refrescar_vista()
+
     def _al_cambiar_filtro_moneda(self, nueva_moneda: str, incluir_todas: bool):
         self._moneda_grafica = nueva_moneda
         self._incluir_todas_convertidas = incluir_todas
         self._refrescar_vista()
 
-    def _al_cambiar_filtro(self):
-        filtro = self._var_filtro.get()
-        self._filtro_actual = filtro
-        if filtro == "Periodo":
-            self._marco_periodo.pack(fill="x", padx=16, pady=(0, 12))
-            if self._fecha_desde is None:
-                self._elegir_fecha_inicio()
-            else:
-                self._refrescar_vista()
-        else:
-            self._marco_periodo.pack_forget()
-            self._refrescar_vista()
-
-    def _elegir_fecha_inicio(self):
-        SelectorCalendario(
-            self,
-            al_elegir=self._al_elegir_inicio,
-            fecha_inicial=self._fecha_desde or date.today(),
-        )
-
-    def _al_elegir_inicio(self, fecha: date):
-        self._fecha_desde = fecha
-        self._boton_desde.configure(text=fecha.isoformat())
-        SelectorCalendario(
-            self,
-            al_elegir=self._al_elegir_final,
-            fecha_inicial=fecha,
-        )
-
-    def _elegir_fecha_final(self):
-        SelectorCalendario(
-            self,
-            al_elegir=self._al_elegir_final,
-            fecha_inicial=self._fecha_hasta or self._fecha_desde or date.today(),
-        )
-
-    def _al_elegir_final(self, fecha: date):
-        if self._fecha_desde is not None and fecha < self._fecha_desde:
-            messagebox.showwarning(
-                "Fechas incoherentes",
-                "La fecha final no puede ser anterior a la fecha inicial.",
-                parent=self,
-            )
-            return
-        self._fecha_hasta = fecha
-        self._boton_hasta.configure(text=fecha.isoformat())
-        self._refrescar_vista()
-
-    def _rango_del_filtro(self) -> Tuple[Optional[date], Optional[date], str]:
-        hoy = date.today()
-        filtro = self._filtro_actual
-        if filtro == "Día":
-            return hoy, hoy, f"Gastos de hoy ({hoy.isoformat()})"
-        if filtro == "Semana":
-            inicio_sem = hoy - timedelta(days=hoy.weekday())
-            fin_sem = inicio_sem + timedelta(days=6)
-            return inicio_sem, fin_sem, f"Gastos de esta semana ({inicio_sem.strftime('%d/%m')} - {fin_sem.strftime('%d/%m')})"
-        if filtro == "Mes":
-            inicio_mes = date(hoy.year, hoy.month, 1)
-            if hoy.month == 12:
-                fin_mes = date(hoy.year, 12, 31)
-            else:
-                fin_mes = date(hoy.year, hoy.month + 1, 1) - timedelta(days=1)
-            return inicio_mes, fin_mes, "Gastos de este mes"
-        if filtro == "Año":
-            return date(hoy.year, 1, 1), date(hoy.year, 12, 31), f"Gastos del año {hoy.year}"
-        if filtro == "Periodo":
-            if self._fecha_desde and self._fecha_hasta:
-                etiqueta = f"Periodo: {self._fecha_desde.isoformat()} a {self._fecha_hasta.isoformat()}"
-                return self._fecha_desde, self._fecha_hasta, etiqueta
-            return hoy, hoy, "Seleccione un rango en el calendario"
-        return None, None, "Gastos"
-
     # ------------------------------------------------------------------
     # Gráfica Circular (Dona) y Actualización de Datos
     # ------------------------------------------------------------------
     def _refrescar_vista(self):
-        fecha_ini, fecha_fin, etiqueta_rango = self._rango_del_filtro()
+        fecha_ini = self._fecha_inicio
+        fecha_fin = self._fecha_fin
         sufijo_modo = (
             f"Todo convertido a {self._moneda_grafica}"
             if self._incluir_todas_convertidas
             else f"Solo {self._moneda_grafica}"
         )
-        self._titulo_rango.configure(text=f"{etiqueta_rango} ({sufijo_modo})")
+        self._titulo_rango.configure(
+            text=f"Gastos · {self._texto_periodo} ({sufijo_modo})"
+        )
 
         resumen_global = self._gestor.resumen_gastos_periodo(
             fecha_inicio=fecha_ini,

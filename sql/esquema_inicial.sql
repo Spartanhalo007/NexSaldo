@@ -1,5 +1,5 @@
 -- Esquema de base de datos local para NexSaldo
--- Incluye tablas originales, Módulo de Gastos, Divisas Mundiales y Cotizaciones en tiempo real (Yahoo Finance)
+-- Incluye tablas originales, Módulo de Gastos, Módulo de Ingresos, Divisas Mundiales y Cotizaciones en tiempo real
 
 CREATE TABLE IF NOT EXISTS categoria (
     id SERIAL PRIMARY KEY,
@@ -78,7 +78,6 @@ CREATE TABLE IF NOT EXISTS transferencia (
     CONSTRAINT origen_distinto_de_destino CHECK (cuenta_origen_id <> cuenta_destino_id)
 );
 
--- Ampliar restricciones de moneda existentes para permitir todas las divisas ISO 4217 del mundo
 ALTER TABLE cuenta DROP CONSTRAINT IF EXISTS cuenta_moneda_check;
 ALTER TABLE movimiento_financiero DROP CONSTRAINT IF EXISTS movimiento_financiero_moneda_check;
 ALTER TABLE transferencia DROP CONSTRAINT IF EXISTS transferencia_moneda_check;
@@ -88,24 +87,26 @@ CREATE TABLE IF NOT EXISTS color_reciente (
     fecha_uso TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Historial de las últimas divisas usadas por el usuario (para mostrar COP + 4 últimas en el selector)
 CREATE TABLE IF NOT EXISTS moneda_reciente (
     codigo CHAR(3) PRIMARY KEY,
     fecha_uso TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabla para conservar cotizaciones y tasas de cambio en tiempo real de Yahoo Finance
 CREATE TABLE IF NOT EXISTS cotizacion (
     id SERIAL PRIMARY KEY,
     simbolo VARCHAR(20) NOT NULL,
     fecha DATE NOT NULL,
-    precio NUMERIC(16,4) NOT NULL CHECK (precio > 0),
+    precio NUMERIC(20,8) NOT NULL CHECK (precio > 0),
     moneda CHAR(3) NOT NULL,
     fuente VARCHAR(40) NOT NULL DEFAULT 'Yahoo Finance (Tiempo real)',
     fecha_actualizacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (simbolo, fecha)
 );
 
+ALTER TABLE cotizacion ALTER COLUMN precio TYPE NUMERIC(20,8);
+DELETE FROM cotizacion WHERE precio < 0.01;
+
+-- Categorías predeterminadas de GASTOS e INGRESOS
 INSERT INTO categoria (nombre, tipo, simbolo, color, es_predeterminada) VALUES
     ('Salud', 'GASTO', 'corazon_pulso', '#F28C8C', TRUE),
     ('Ocio', 'GASTO', 'billetera', '#408FD1', TRUE),
@@ -116,8 +117,15 @@ INSERT INTO categoria (nombre, tipo, simbolo, color, es_predeterminada) VALUES
     ('Alimentación', 'GASTO', 'mercado', '#7DC98F', TRUE),
     ('Transporte', 'GASTO', 'carro', '#56B4E9', FALSE),
     ('Vivienda', 'GASTO', 'casa', '#E69F00', FALSE),
-    ('Salario', 'INGRESO', 'cash', '#7DC98F', FALSE)
+    ('Salario', 'INGRESO', 'cash', '#7DC98F', TRUE),
+    ('Regalo', 'INGRESO', 'regalo', '#E86F9A', TRUE),
+    ('Intereses', 'INGRESO', 'grafico_subida', '#FBB718', TRUE),
+    ('Préstamo', 'INGRESO', 'banco', '#408FD1', TRUE),
+    ('Ventas', 'INGRESO', 'bolsa_compras', '#89BF50', TRUE),
+    ('Bonificación', 'INGRESO', 'moneda', '#D98A4E', TRUE),
+    ('Otros', 'INGRESO', 'puerquito', '#9B7EDE', TRUE)
 ON CONFLICT (nombre) DO UPDATE SET
+    tipo = EXCLUDED.tipo,
     simbolo = EXCLUDED.simbolo,
     color = EXCLUDED.color,
     es_predeterminada = EXCLUDED.es_predeterminada;
