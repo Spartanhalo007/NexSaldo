@@ -1,20 +1,16 @@
-"""Acceso a PostgreSQL local (RepositorioLocal del modelo de la tesis).
+"""Repositorio local sobre PostgreSQL para NexSaldo."""
 
-Responsabilidades:
-- Abrir y cerrar la conexión con PostgreSQL local.
-- Aplicar el esquema inicial de la base de datos.
-- Guardar, consultar y eliminar movimientos financieros.
-- Ejecutar consultas parametrizadas.
-
-No contiene reglas de negocio: la validación y coordinación viven en
-GestorFinanciero. Toda consulta usa parámetros (%s), nunca concatenación.
-"""
-
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
-
+from typing import Dict, Iterable, List, Optional, Tuple
 import psycopg2
 
+from app.configuracion import ConfiguracionBD
+from app.modelo.categoria import Categoria
+from app.modelo.cotizacion import Cotizacion
 from app.modelo.cuenta import Cuenta
+from app.modelo.etiqueta import Etiqueta
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
 
@@ -22,296 +18,571 @@ RUTA_ESQUEMA = Path(__file__).resolve().parents[2] / "sql" / "esquema_inicial.sq
 
 
 class RepositorioLocal:
-    """Maneja la conexión y las operaciones sobre la base de datos local."""
+    """Gestiona la persistencia local en PostgreSQL."""
 
-    def __init__(self, configuracion):
-        self._config = configuracion
+    def __init__(self, configuracion: ConfiguracionBD):
+        self._configuracion = configuracion
         self._conexion = None
+        self.conectar()
+        self.aplicar_esquema()
 
     def conectar(self):
-        """Abre la conexión si no existe o si la anterior fue cerrada."""
         if self._conexion is None or self._conexion.closed:
             self._conexion = psycopg2.connect(
-                host=self._config.host,
-                port=self._config.puerto,
-                dbname=self._config.nombre,
-                user=self._config.usuario,
-                password=self._config.contrasena,
+                host=self._configuracion.host,
+                port=self._configuracion.puerto,
+                dbname=self._configuracion.nombre,
+                user=self._configuracion.usuario,
+                password=self._configuracion.contrasena,
             )
         return self._conexion
 
     def cerrar(self):
-        """Cierra la conexión si está abierta."""
         if self._conexion is not None and not self._conexion.closed:
             self._conexion.close()
 
     def aplicar_esquema(self) -> bool:
-        """Crea las tablas del esquema inicial si no existen.
-
-        Usa una transacción: si falla, no quedan cambios parciales.
-        Devuelve True cuando se aplica sin errores; lanza la excepción de
-        PostgreSQL en caso contrario.
-        """
+        if not RUTA_ESQUEMA.exists():
+            return False
         sql = RUTA_ESQUEMA.read_text(encoding="utf-8")
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(sql)
+        with conexion.cursor() as cursor:
+            cursor.execute(sql)
+        conexion.commit()
         return True
 
-    def ejecutar_consulta(self, sql, parametros=None):
-        """Ejecuta una consulta SELECT parametrizada y devuelve las filas.
-
-        Nunca concatene valores al texto SQL: pase siempre `parametros`.
-        """
+    def ejecutar_consulta(self, sql: str, parametros=None):
         conexion = self.conectar()
         with conexion.cursor() as cursor:
-            cursor.execute(sql, parametros)
-            return cursor.fetchall()
+            cursor.execute(sql, parametros or ())
+            if cursor.description is not None:
+                filas = cursor.fetchall()
+            else:
+                filas = []
+        conexion.commit()
+        return filas
 
     # ------------------------------------------------------------------
-    # Movimientos financieros (CU-01)
+    # Categorías
     # ------------------------------------------------------------------
-
-    def obtener_categorias(self):
-        """Devuelve los nombres de las categorías, ordenados alfabéticamente."""
+    def obtener_categorias(self) -> List[str]:
         filas = self.ejecutar_consulta("SELECT nombre FROM categoria ORDER BY nombre")
         return [fila[0] for fila in filas]
 
-    def insertar_movimiento(self, movimiento: MovimientoFinanciero) -> MovimientoFinanciero:
-        """Guarda un movimiento en una transacción y devuelve el movimiento con id.
+    def obtener_categorias_detalladas(self, tipo: Optional[str] = None) -> List[Categoria]:
+        if tipo:
+            sql = """
+                SELECT id, nombre, COALESCE(tipo, 'GASTO'), COALESCE(simbolo, 'mercado'),
+                       COALESCE(color, '#FBB718'), COALESCE(es_predeterminada, FALSE),
+                       COALESCE(gasto_programado, FALSE), frecuencia
+                FROM categoria
+                WHERE COALESCE(tipo, 'GASTO') = %s
+                ORDER BY es_predeterminada DESC, id ASC
+            """
+            filas = self.ejecutar_consulta(sql, (tipo.upper(),))
+        else:
+            sql = """
+                SELECT id, nombre, COALESCE(tipo, 'GASTO'), COALESCE(simbolo, 'mercado'),
+                       COALESCE(color, '#FBB718'), COALESCE(es_predeterminada, FALSE),
+                       COALESCE(gasto_programado, FALSE), frecuencia
+                FROM categoria
+                ORDER BY es_predeterminada DESC, id ASC
+            """
+            filas = self.ejecutar_consulta(sql)
+        return [
+            Categoria(
+                id=f[0],
+                nombre=f[1],
+                tipo=f[2],
+                simbolo=f[3],
+                color=f[4],
+                es_predeterminada=bool(f[5]),
+                gasto_programado=bool(f[6]),
+                frecuencia=f[7],
+            )
+            for f in filas
+        ]
 
-        Si algo falla (categoría inexistente, restricción de la tabla), la
-        transacción se revierte: no quedan cambios parciales (RNF-07).
-        """
+    def insertar_categoria(self, categoria: Categoria) -> Categoria:
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(
-                    "SELECT id FROM categoria WHERE nombre = %s",
-                    (movimiento.categoria,),
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO categoria (
+                    nombre, tipo, simbolo, color, es_predeterminada, gasto_programado, frecuencia
                 )
-                fila = cursor.fetchone()
-                if fila is None:
-                    raise LookupError(
-                        f"La categoría «{movimiento.categoria}» no existe en el catálogo."
-                    )
-                cursor.execute(
-                    """INSERT INTO movimiento_financiero
-                           (tipo_movimiento, fecha, valor, moneda, categoria_id, descripcion)
-                       VALUES (%s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (
-                        movimiento.tipo_movimiento,
-                        movimiento.fecha,
-                        movimiento.valor,
-                        movimiento.moneda,
-                        fila[0],
-                        movimiento.descripcion,
-                    ),
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (nombre) DO UPDATE SET
+                    tipo = EXCLUDED.tipo,
+                    simbolo = EXCLUDED.simbolo,
+                    color = EXCLUDED.color,
+                    gasto_programado = EXCLUDED.gasto_programado,
+                    frecuencia = EXCLUDED.frecuencia
+                RETURNING id
+                """,
+                (
+                    categoria.nombre,
+                    categoria.tipo,
+                    categoria.simbolo,
+                    categoria.color,
+                    categoria.es_predeterminada,
+                    categoria.gasto_programado,
+                    categoria.frecuencia,
+                ),
+            )
+            nuevo_id = cursor.fetchone()[0]
+        conexion.commit()
+        return categoria.con_id(nuevo_id)
+
+    # ------------------------------------------------------------------
+    # Etiquetas 100% customizables
+    # ------------------------------------------------------------------
+    def obtener_etiquetas(self) -> List[Etiqueta]:
+        filas = self.ejecutar_consulta(
+            "SELECT id, nombre, COALESCE(color, '#408FD1') FROM etiqueta ORDER BY nombre ASC"
+        )
+        return [Etiqueta(id=f[0], nombre=f[1], color=f[2]) for f in filas]
+
+    def insertar_etiqueta(self, etiqueta: Etiqueta) -> Etiqueta:
+        conexion = self.conectar()
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO etiqueta (nombre, color)
+                VALUES (%s, %s)
+                ON CONFLICT (nombre) DO UPDATE SET color = EXCLUDED.color
+                RETURNING id
+                """,
+                (etiqueta.nombre, etiqueta.color),
+            )
+            nuevo_id = cursor.fetchone()[0]
+        conexion.commit()
+        return etiqueta.con_id(nuevo_id)
+
+    def _obtener_etiquetas_de_movimiento(self, movimiento_id: int) -> Tuple[str, ...]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT e.nombre
+            FROM etiqueta e
+            JOIN movimiento_etiqueta me ON me.etiqueta_id = e.id
+            WHERE me.movimiento_id = %s
+            ORDER BY e.nombre ASC
+            """,
+            (movimiento_id,),
+        )
+        return tuple(f[0] for f in filas)
+
+    # ------------------------------------------------------------------
+    # Movimientos financieros y Gastos
+    # ------------------------------------------------------------------
+    def insertar_movimiento(self, movimiento: MovimientoFinanciero) -> MovimientoFinanciero:
+        conexion = self.conectar()
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM categoria WHERE nombre = %s",
+                (movimiento.categoria,),
+            )
+            fila_cat = cursor.fetchone()
+            if fila_cat is None:
+                raise LookupError(f"La categoría '{movimiento.categoria}' no existe.")
+            categoria_id = fila_cat[0]
+
+            cursor.execute(
+                """
+                INSERT INTO movimiento_financiero (
+                    tipo_movimiento, fecha, valor, moneda, categoria_id,
+                    descripcion, cuenta_id, imagen, es_programado, frecuencia
                 )
-                nuevo_id = cursor.fetchone()[0]
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    movimiento.tipo_movimiento,
+                    movimiento.fecha,
+                    movimiento.valor,
+                    movimiento.moneda,
+                    categoria_id,
+                    movimiento.descripcion,
+                    movimiento.cuenta_id,
+                    movimiento.imagen,
+                    movimiento.es_programado,
+                    movimiento.frecuencia,
+                ),
+            )
+            nuevo_id = cursor.fetchone()[0]
+
+            etiquetas_limpias = getattr(movimiento, "etiquetas", ()) or ()
+            for nombre_et in etiquetas_limpias:
+                cursor.execute(
+                    """
+                    INSERT INTO etiqueta (nombre)
+                    VALUES (%s)
+                    ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre
+                    RETURNING id
+                    """,
+                    (nombre_et,),
+                )
+                etiqueta_id = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    INSERT INTO movimiento_etiqueta (movimiento_id, etiqueta_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (nuevo_id, etiqueta_id),
+                )
+        conexion.commit()
         return movimiento.con_id(nuevo_id)
 
-    def obtener_movimientos(self, tipo=None):
-        """Devuelve los movimientos guardados, opcionalmente por tipo.
-
-        Ordenados del más reciente al más antiguo. Los importes llegan como
-        Decimal (columna NUMERIC), sin pasar por float.
-        """
-        sql = """SELECT m.id, m.tipo_movimiento, m.fecha, m.valor, m.moneda,
-                        c.nombre, m.descripcion
-                   FROM movimiento_financiero m
-                   JOIN categoria c ON c.id = m.categoria_id"""
+    def obtener_movimientos(
+        self,
+        tipo: Optional[str] = None,
+        fecha_inicio: Optional[date] = None,
+        fecha_fin: Optional[date] = None,
+    ) -> List[MovimientoFinanciero]:
+        condiciones = []
         parametros = []
         if tipo is not None:
-            sql += " WHERE m.tipo_movimiento = %s"
+            condiciones.append("m.tipo_movimiento = %s")
             parametros.append(tipo)
-        sql += " ORDER BY m.fecha DESC, m.id DESC"
-        filas = self.ejecutar_consulta(sql, parametros or None)
-        return [
-            MovimientoFinanciero(
-                id=fila[0],
-                tipo_movimiento=fila[1],
-                fecha=fila[2],
-                valor=fila[3],
-                moneda=fila[4],
-                categoria=fila[5],
-                descripcion=fila[6],
+        if fecha_inicio is not None:
+            condiciones.append("m.fecha >= %s")
+            parametros.append(fecha_inicio)
+        if fecha_fin is not None:
+            condiciones.append("m.fecha <= %s")
+            parametros.append(fecha_fin)
+
+        clausula_where = ""
+        if condiciones:
+            clausula_where = "WHERE " + " AND ".join(condiciones)
+
+        sql = f"""
+            SELECT m.id, m.tipo_movimiento, m.fecha, m.valor, m.moneda,
+                   c.nombre, m.descripcion, m.cuenta_id, m.imagen,
+                   COALESCE(m.es_programado, FALSE), m.frecuencia
+            FROM movimiento_financiero m
+            JOIN categoria c ON c.id = m.categoria_id
+            {clausula_where}
+            ORDER BY m.fecha DESC, m.id DESC
+        """
+        filas = self.ejecutar_consulta(sql, tuple(parametros))
+        resultado = []
+        for f in filas:
+            etiquetas = self._obtener_etiquetas_de_movimiento(f[0])
+            resultado.append(
+                MovimientoFinanciero(
+                    id=f[0],
+                    tipo_movimiento=f[1],
+                    fecha=f[2],
+                    valor=Decimal(str(f[3])),
+                    moneda=f[4].strip(),
+                    categoria=f[5],
+                    descripcion=f[6],
+                    cuenta_id=f[7],
+                    etiquetas=etiquetas,
+                    imagen=f[8],
+                    es_programado=bool(f[9]),
+                    frecuencia=f[10],
+                )
             )
-            for fila in filas
-        ]
+        return resultado
 
-    def resumen_mensual(self, anno, mes):
-        """Devuelve el total de movimientos de un mes agrupado por tipo,
-        moneda y categoría.
+    def obtener_ultima_fecha_movimiento(self, tipo: str = "GASTO") -> Optional[date]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT m.fecha
+            FROM movimiento_financiero m
+            WHERE m.tipo_movimiento = %s
+            ORDER BY m.fecha_registro DESC, m.id DESC
+            LIMIT 1
+            """,
+            (tipo,),
+        )
+        return filas[0][0] if filas else None
 
-        Cada fila es (tipo_movimiento, moneda, categoria, total Decimal).
-        Los importes llegan como Decimal (columna NUMERIC), sin pasar por
-        float.
+    def resumen_mensual(self, anno: int, mes: int) -> List[Tuple[str, str, str, Decimal]]:
+        sql = """
+            SELECT m.tipo_movimiento, m.moneda, c.nombre, SUM(m.valor)
+            FROM movimiento_financiero m
+            JOIN categoria c ON c.id = m.categoria_id
+            WHERE EXTRACT(YEAR FROM m.fecha) = %s AND EXTRACT(MONTH FROM m.fecha) = %s
+            GROUP BY m.tipo_movimiento, m.moneda, c.nombre
+            ORDER BY c.nombre
         """
-        sql = """SELECT m.tipo_movimiento, m.moneda, c.nombre, SUM(m.valor)
-                   FROM movimiento_financiero m
-                   JOIN categoria c ON c.id = m.categoria_id
-                  WHERE EXTRACT(YEAR FROM m.fecha) = %s
-                    AND EXTRACT(MONTH FROM m.fecha) = %s
-                  GROUP BY m.tipo_movimiento, m.moneda, c.nombre
-                  ORDER BY c.nombre"""
         filas = self.ejecutar_consulta(sql, (anno, mes))
-        return [(fila[0], fila[1], fila[2], fila[3]) for fila in filas]
+        return [(f[0], f[1].strip(), f[2], Decimal(str(f[3]))) for f in filas]
 
-    def eliminar_movimiento(self, id_movimiento) -> bool:
-        """Elimina un movimiento por su id en una transacción.
-
-        Devuelve True si el movimiento existía y False si no.
-        """
+    def eliminar_movimiento(self, id_movimiento: int) -> bool:
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(
-                    "DELETE FROM movimiento_financiero WHERE id = %s",
-                    (id_movimiento,),
-                )
-                return cursor.rowcount == 1
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM movimiento_financiero WHERE id = %s RETURNING id",
+                (id_movimiento,),
+            )
+            eliminado = cursor.fetchone() is not None
+        conexion.commit()
+        return eliminado
 
     # ------------------------------------------------------------------
-    # Cuentas y transferencias (módulo Cuentas)
+    # Cuentas y Saldos
     # ------------------------------------------------------------------
-
     def insertar_cuenta(self, cuenta: Cuenta) -> Cuenta:
-        """Guarda una cuenta nueva y devuelve una copia con su id.
-
-        Usa una transacción: si falla, no quedan cambios parciales.
-        """
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO cuenta
-                       (nombre, moneda, saldo_inicial, simbolo, color,
-                        incluye_en_total, nota)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (cuenta.nombre, cuenta.moneda, cuenta.saldo_inicial,
-                     cuenta.simbolo, cuenta.color, cuenta.incluye_en_total,
-                     cuenta.nota),
-                )
-                nuevo_id = cursor.fetchone()[0]
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO cuenta (nombre, moneda, saldo_inicial, simbolo, color, incluye_en_total, nota)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    cuenta.nombre,
+                    cuenta.moneda,
+                    cuenta.saldo_inicial,
+                    cuenta.simbolo,
+                    cuenta.color,
+                    cuenta.incluye_en_total,
+                    cuenta.nota,
+                ),
+            )
+            nuevo_id = cursor.fetchone()[0]
+        conexion.commit()
         return cuenta.con_id(nuevo_id)
 
-    def obtener_cuentas(self):
-        """Devuelve las cuentas con su saldo actual, ordenadas por nombre.
-
-        Cada elemento es (Cuenta, saldo_actual Decimal). El saldo actual
-        se calcula en SQL: saldo inicial + recibidas - enviadas, sin pasar
-        por float.
+    def obtener_cuentas(self) -> List[Tuple[Cuenta, Decimal]]:
+        sql = """
+            SELECT c.id, c.nombre, c.moneda, c.saldo_inicial, c.simbolo,
+                   c.color, c.incluye_en_total, c.nota,
+                   c.saldo_inicial
+                   + COALESCE((SELECT SUM(t.valor) FROM transferencia t WHERE t.cuenta_destino_id = c.id), 0)
+                   - COALESCE((SELECT SUM(t.valor) FROM transferencia t WHERE t.cuenta_origen_id = c.id), 0)
+                   + COALESCE((SELECT SUM(m.valor) FROM movimiento_financiero m WHERE m.cuenta_id = c.id AND m.tipo_movimiento = 'INGRESO'), 0)
+                   - COALESCE((SELECT SUM(m.valor) FROM movimiento_financiero m WHERE m.cuenta_id = c.id AND m.tipo_movimiento = 'GASTO'), 0)
+                   AS saldo_actual
+            FROM cuenta c
+            ORDER BY c.nombre
         """
-        sql = """SELECT c.id, c.nombre, c.moneda, c.saldo_inicial, c.simbolo,
-                        c.color, c.incluye_en_total, c.nota,
-                        c.saldo_inicial
-                        + COALESCE((SELECT SUM(t.valor) FROM transferencia t
-                                    WHERE t.cuenta_destino_id = c.id), 0)
-                        - COALESCE((SELECT SUM(t.valor) FROM transferencia t
-                                    WHERE t.cuenta_origen_id = c.id), 0)
-                        AS saldo_actual
-                   FROM cuenta c
-                  ORDER BY c.nombre"""
-        return [
-            (Cuenta(
-                id=fila[0], nombre=fila[1], moneda=fila[2],
-                saldo_inicial=fila[3], simbolo=fila[4], color=fila[5],
-                incluye_en_total=fila[6], nota=fila[7],
-            ), fila[8])
-            for fila in self.ejecutar_consulta(sql)
-        ]
+        filas = self.ejecutar_consulta(sql)
+        resultado = []
+        for f in filas:
+            cuenta = Cuenta(
+                id=f[0],
+                nombre=f[1],
+                moneda=f[2].strip(),
+                saldo_inicial=Decimal(str(f[3])),
+                simbolo=f[4],
+                color=f[5],
+                incluye_en_total=bool(f[6]),
+                nota=f[7],
+            )
+            resultado.append((cuenta, Decimal(str(f[8]))))
+        return resultado
 
-    def obtener_cuenta(self, id_cuenta):
-        """Devuelve una cuenta por su id, o None si no existe."""
+    def obtener_cuenta(self, id_cuenta: int) -> Optional[Cuenta]:
         filas = self.ejecutar_consulta(
-            "SELECT id, nombre, moneda, saldo_inicial, simbolo, color, "
-            "incluye_en_total, nota FROM cuenta WHERE id = %s",
+            """
+            SELECT id, nombre, moneda, saldo_inicial, simbolo, color, incluye_en_total, nota
+            FROM cuenta
+            WHERE id = %s
+            """,
             (id_cuenta,),
         )
         if not filas:
             return None
-        fila = filas[0]
+        f = filas[0]
         return Cuenta(
-            id=fila[0], nombre=fila[1], moneda=fila[2], saldo_inicial=fila[3],
-            simbolo=fila[4], color=fila[5], incluye_en_total=fila[6],
-            nota=fila[7],
+            id=f[0],
+            nombre=f[1],
+            moneda=f[2].strip(),
+            saldo_inicial=Decimal(str(f[3])),
+            simbolo=f[4],
+            color=f[5],
+            incluye_en_total=bool(f[6]),
+            nota=f[7],
         )
 
-    def saldos_de_cuentas(self):
-        """Devuelve {id_cuenta: saldo_actual Decimal} de todas las cuentas."""
-        sql = """SELECT c.id,
-                        c.saldo_inicial
-                        + COALESCE((SELECT SUM(t.valor) FROM transferencia t
-                                    WHERE t.cuenta_destino_id = c.id), 0)
-                        - COALESCE((SELECT SUM(t.valor) FROM transferencia t
-                                    WHERE t.cuenta_origen_id = c.id), 0)
-                   FROM cuenta c"""
-        return {fila[0]: fila[1] for fila in self.ejecutar_consulta(sql)}
-
-    def insertar_transferencia(self, transferencia: Transferencia) -> Transferencia:
-        """Guarda una transferencia y devuelve una copia con su id.
-
-        Usa una transacción: si falla, no quedan cambios parciales.
+    def saldos_de_cuentas(self) -> Dict[int, Decimal]:
+        sql = """
+            SELECT c.id,
+                   c.saldo_inicial
+                   + COALESCE((SELECT SUM(t.valor) FROM transferencia t WHERE t.cuenta_destino_id = c.id), 0)
+                   - COALESCE((SELECT SUM(t.valor) FROM transferencia t WHERE t.cuenta_origen_id = c.id), 0)
+                   + COALESCE((SELECT SUM(m.valor) FROM movimiento_financiero m WHERE m.cuenta_id = c.id AND m.tipo_movimiento = 'INGRESO'), 0)
+                   - COALESCE((SELECT SUM(m.valor) FROM movimiento_financiero m WHERE m.cuenta_id = c.id AND m.tipo_movimiento = 'GASTO'), 0)
+            FROM cuenta c
         """
+        filas = self.ejecutar_consulta(sql)
+        return {f[0]: Decimal(str(f[1])) for f in filas}
+
+    # ------------------------------------------------------------------
+    # Transferencias, Colores Recientes y Divisas Recientes
+    # ------------------------------------------------------------------
+    def insertar_transferencia(self, transferencia: Transferencia) -> Transferencia:
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO transferencia
-                       (cuenta_origen_id, cuenta_destino_id, valor, moneda,
-                        fecha, comentarios, imagen)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (transferencia.cuenta_origen_id,
-                     transferencia.cuenta_destino_id,
-                     transferencia.valor, transferencia.moneda,
-                     transferencia.fecha, transferencia.comentarios,
-                     transferencia.imagen),
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO transferencia (
+                    cuenta_origen_id, cuenta_destino_id, valor, moneda, fecha, comentarios, imagen
                 )
-                nuevo_id = cursor.fetchone()[0]
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    transferencia.cuenta_origen_id,
+                    transferencia.cuenta_destino_id,
+                    transferencia.valor,
+                    transferencia.moneda,
+                    transferencia.fecha,
+                    transferencia.comentarios,
+                    transferencia.imagen,
+                ),
+            )
+            nuevo_id = cursor.fetchone()[0]
+        conexion.commit()
         return transferencia.con_id(nuevo_id)
 
     def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
-        """Devuelve transferencias con nombres de cuenta, de la más reciente
-        a la más antigua.
-
-        Se puede filtrar por rango de fechas (ambas incluidas). Cada fila
-        es (id, fecha, nombre_origen, nombre_destino, valor, moneda,
-        comentarios, imagen).
-        """
-        sql = """SELECT t.id, t.fecha, o.nombre, d.nombre, t.valor, t.moneda,
-                        t.comentarios, t.imagen
-                   FROM transferencia t
-                   JOIN cuenta o ON o.id = t.cuenta_origen_id
-                   JOIN cuenta d ON d.id = t.cuenta_destino_id
-                  WHERE (%s IS NULL OR t.fecha >= %s)
-                    AND (%s IS NULL OR t.fecha <= %s)
-                  ORDER BY t.fecha DESC, t.id DESC"""
+        condiciones = []
+        parametros = []
+        if fecha_inicio is not None:
+            condiciones.append("t.fecha >= %s")
+            parametros.append(fecha_inicio)
+        if fecha_fin is not None:
+            condiciones.append("t.fecha <= %s")
+            parametros.append(fecha_fin)
+        where_sql = ("WHERE " + " AND ".join(condiciones)) if condiciones else ""
         filas = self.ejecutar_consulta(
-            sql, (fecha_inicio, fecha_inicio, fecha_fin, fecha_fin))
-        return list(filas)
+            f"""
+            SELECT t.id, t.fecha, co.nombre, cd.nombre, t.valor, t.moneda, t.comentarios, t.imagen
+            FROM transferencia t
+            JOIN cuenta co ON co.id = t.cuenta_origen_id
+            JOIN cuenta cd ON cd.id = t.cuenta_destino_id
+            {where_sql}
+            ORDER BY t.fecha DESC, t.id DESC
+            """,
+            tuple(parametros),
+        )
+        return [
+            (
+                f[0],
+                f[1],
+                f[2],
+                f[3],
+                Decimal(str(f[4])),
+                f[5].strip(),
+                f[6],
+                f[7],
+            )
+            for f in filas
+        ]
 
-    def registrar_color_reciente(self, color):
-        """Guarda (o actualiza) un color como usado ahora mismo."""
+    def registrar_color_reciente(self, color: str):
         conexion = self.conectar()
-        with conexion:
-            with conexion.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO color_reciente (valor) VALUES (%s)
-                       ON CONFLICT (valor)
-                       DO UPDATE SET fecha_uso = CURRENT_TIMESTAMP""",
-                    (color,),
-                )
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO color_reciente (valor, fecha_uso)
+                VALUES (%s, CURRENT_TIMESTAMP)
+                ON CONFLICT (valor) DO UPDATE SET fecha_uso = CURRENT_TIMESTAMP
+                """,
+                (color.upper(),),
+            )
+        conexion.commit()
 
-    def obtener_colores_recientes(self, maximo=8):
-        """Devuelve los últimos colores usados (#RRGGBB), del más reciente."""
+    def obtener_colores_recientes(self, maximo: int = 8) -> List[str]:
         filas = self.ejecutar_consulta(
-            "SELECT valor FROM color_reciente "
-            "ORDER BY fecha_uso DESC LIMIT %s",
+            """
+            SELECT valor FROM color_reciente
+            ORDER BY fecha_uso DESC
+            LIMIT %s
+            """,
             (maximo,),
         )
-        return [fila[0] for fila in filas]
+        return [f[0] for f in filas]
+
+    def registrar_moneda_reciente(self, codigo: str):
+        codigo_limpio = codigo.strip().upper()
+        if codigo_limpio == "COP":
+            return
+        conexion = self.conectar()
+        with conexion.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO moneda_reciente (codigo, fecha_uso)
+                VALUES (%s, CURRENT_TIMESTAMP)
+                ON CONFLICT (codigo) DO UPDATE SET fecha_uso = CURRENT_TIMESTAMP
+                """,
+                (codigo_limpio,),
+            )
+        conexion.commit()
+
+    def obtener_monedas_recientes(self, maximo: int = 4) -> List[str]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT codigo FROM moneda_reciente
+            WHERE codigo <> 'COP'
+            ORDER BY fecha_uso DESC
+            LIMIT %s
+            """,
+            (maximo,),
+        )
+        return [f[0].strip().upper() for f in filas]
+
+    # ------------------------------------------------------------------
+    # Cotizaciones y tasas de cambio en tiempo real (Yahoo Finance)
+    # ------------------------------------------------------------------
+    def guardar_cotizaciones(self, cotizaciones: Iterable[Cotizacion]) -> List[Cotizacion]:
+        conexion = self.conectar()
+        guardadas: List[Cotizacion] = []
+        with conexion.cursor() as cursor:
+            for cot in cotizaciones:
+                cursor.execute(
+                    """
+                    INSERT INTO cotizacion (simbolo, fecha, precio, moneda, fuente)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (simbolo, fecha) DO UPDATE SET
+                        precio = EXCLUDED.precio,
+                        moneda = EXCLUDED.moneda,
+                        fuente = EXCLUDED.fuente,
+                        fecha_actualizacion = CURRENT_TIMESTAMP
+                    RETURNING id
+                    """,
+                    (
+                        cot.simbolo.strip().upper(),
+                        cot.fecha,
+                        cot.precio,
+                        cot.moneda.strip().upper(),
+                        cot.fuente,
+                    ),
+                )
+                nuevo_id = cursor.fetchone()[0]
+                guardadas.append(cot.con_id(nuevo_id))
+        conexion.commit()
+        return guardadas
+
+    def obtener_cotizaciones(self, simbolo: str) -> List[Cotizacion]:
+        filas = self.ejecutar_consulta(
+            """
+            SELECT id, simbolo, fecha, precio, moneda, fuente
+            FROM cotizacion
+            WHERE simbolo = %s
+            ORDER BY fecha DESC, id DESC
+            """,
+            (simbolo.strip().upper(),),
+        )
+        return [
+            Cotizacion(
+                id=f[0],
+                simbolo=f[1],
+                fecha=f[2],
+                precio=Decimal(str(f[3])),
+                moneda=f[4].strip(),
+                fuente=f[5],
+            )
+            for f in filas
+        ]
+
+    def obtener_ultima_cotizacion(self, simbolo: str) -> Optional[Cotizacion]:
+        cotizaciones = self.obtener_cotizaciones(simbolo)
+        return cotizaciones[0] if cotizaciones else None
