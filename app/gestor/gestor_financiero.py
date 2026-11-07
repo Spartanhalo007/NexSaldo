@@ -20,6 +20,7 @@ from app.modelo.divisas import (
     construir_lista_selector_divisas,
 )
 from app.modelo.etiqueta import Etiqueta
+from app.modelo.inversion import CATALOGO_ACTIVOS_BURSATILES, Inversion, ValoracionInversion
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
 from app.servicio.servicio_bursatil import (
@@ -228,6 +229,7 @@ class GestorFinanciero:
             )
         }
         self._etiquetas_memoria_extra: Dict[str, Etiqueta] = {}
+        self._inversiones_memoria: List[Inversion] = []
 
     # ------------------------------------------------------------------
     # Estado de conexión a internet, caché offline y notificaciones a la GUI
@@ -1258,6 +1260,363 @@ class GestorFinanciero:
 
     def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
         return self._repositorio.obtener_transferencias(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+    # ------------------------------------------------------------------
+    # Módulo de Inversiones Bursátiles (Buscador, Portafolio, Valoración en Vivo y Curva de Montaña)
+    # ------------------------------------------------------------------
+    def buscar_activos_bursatiles(self, consulta: str = "") -> List[Dict[str, str]]:
+        """Busca tickers de acciones y ETFs (ej. QQQ, VOO, SPY, AAPL, NVDA)."""
+        if hasattr(self._servicio_bursatil, "buscar_activos_bursatiles"):
+            return self._servicio_bursatil.buscar_activos_bursatiles(consulta)
+        return list(CATALOGO_ACTIVOS_BURSATILES)
+
+    def obtener_inversiones(self) -> List[Inversion]:
+        if hasattr(self._repositorio, "obtener_inversiones"):
+            try:
+                return self._repositorio.obtener_inversiones()
+            except Exception:
+                pass
+        return list(self._inversiones_memoria)
+
+    def registrar_inversion(
+        self,
+        simbolo: str,
+        nombre: str,
+        monto_texto: str,
+        moneda: str = "USD",
+        precio_compra_texto: Optional[str] = None,
+        fecha_texto: Optional[str] = None,
+        cuenta_id: Optional[int] = None,
+        notas: Optional[str] = None,
+    ) -> Inversion:
+        """Registra una inversión bursátil calculando automáticamente la fracción de títulos
+        comprados según el monto invertido y el precio de mercado (o precio de compra indicado)."""
+        if not isinstance(simbolo, str) or not simbolo.strip():
+            raise ErrorValidacion("El símbolo bursátil (ticker) es obligatorio.")
+        simbolo_limpio = simbolo.strip().upper()
+        nombre_limpio = (nombre or simbolo_limpio).strip()[:100]
+        monto_valido = self._validar_valor(monto_texto)
+        moneda_valida = self._validar_moneda(moneda)
+        self.registrar_moneda_usada(moneda_valida)
+        fecha_valida = (
+            self._validar_fecha(fecha_texto)
+            if fecha_texto and fecha_texto.strip()
+            else date.today()
+        )
+        notas_limpias = self._validar_descripcion(notas)
+
+        # Determinar el precio de compra en la moneda de la inversión
+        precio_compra: Optional[Decimal] = None
+        if precio_compra_texto and str(precio_compra_texto).strip():
+            try:
+                p_dec = Decimal(str(precio_compra_texto).strip().replace(",", "."))
+                if p_dec > Decimal("0"):
+                    precio_compra = p_dec.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+            except InvalidOperation as error:
+                raise ErrorValidacion("El precio de compra por acción/título no es válido.") from error
+
+        if precio_compra is None:
+            cot_mercado = self.consultar_precio_inversion(simbolo_limpio, moneda_esperada="USD")
+            if cot_mercado is not None and cot_mercado.precio > Decimal("0"):
+                if moneda_valida == cot_mercado.moneda:
+                    precio_compra = cot_mercado.precio
+                else:
+                    try:
+                        precio_compra = self.convertir_entre_monedas(
+                            cot_mercado.precio, cot_mercado.moneda, moneda_valida
+                        )
+                    except ErrorValidacion:
+                        precio_compra = cot_mercado.precio
+            else:
+                # Si se registra completamente offline sin caché previa, usar base unitaria 100.00
+                precio_compra = Decimal("100.00000000")
+
+        if precio_compra <= Decimal("0"):
+            raise ErrorValidacion("El precio de compra debe ser mayor que cero.")
+
+        cantidad_titulos = (monto_valido / precio_compra).quantize(
+            Decimal("0.00000001"), rounding=ROUND_HALF_UP
+        )
+        if cantidad_titulos <= Decimal("0"):
+            cantidad_titulos = Decimal("0.00000001")
+
+        nueva = Inversion(
+            id=None,
+            simbolo=simbolo_limpio,
+            nombre=nombre_limpio,
+            monto_invertido=monto_valido,
+            moneda=moneda_valida,
+            precio_compra=precio_compra,
+            cantidad_titulos=cantidad_titulos,
+            fecha_compra=fecha_valida,
+            cuenta_id=cuenta_id,
+            notas=notas_limpias,
+        )
+
+        if hasattr(self._repositorio, "insertar_inversion"):
+            try:
+                return self._repositorio.insertar_inversion(nueva)
+            except Exception:
+                pass
+        guardada = nueva.con_id(len(self._inversiones_memoria) + 1)
+        self._inversiones_memoria.insert(0, guardada)
+        return guardada
+
+    def eliminar_inversion(self, id_inversion: int) -> bool:
+        if hasattr(self._repositorio, "eliminar_inversion"):
+            try:
+                return self._repositorio.eliminar_inversion(id_inversion)
+            except Exception:
+                pass
+        antes = len(self._inversiones_memoria)
+        self._inversiones_memoria = [
+            inv for inv in self._inversiones_memoria if inv.id != id_inversion
+        ]
+        return len(self._inversiones_memoria) < antes
+
+    def valorar_portafolio(
+        self,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = True,
+        forzar_actualizacion: bool = False,
+    ) -> Dict[str, object]:
+        """Calcula la valoración dinámica en tiempo real de todas las inversiones del usuario,
+        indicando ganancias/pérdidas por posición y el total del portafolio."""
+        mon_dest = self._validar_moneda(moneda_objetivo)
+        inversiones = self.obtener_inversiones()
+
+        posiciones: List[ValoracionInversion] = []
+        capital_total = Decimal("0")
+        valor_actual_total = Decimal("0")
+        usando_cache = False
+
+        # Consultar una sola vez por cada ticker único
+        cotizaciones_por_simbolo: Dict[str, Optional[Cotizacion]] = {}
+        for inv in inversiones:
+            if not incluir_todas_convertidas and inv.moneda != mon_dest:
+                continue
+            if inv.simbolo not in cotizaciones_por_simbolo:
+                cotizaciones_por_simbolo[inv.simbolo] = self.consultar_precio_inversion(
+                    inv.simbolo,
+                    moneda_esperada="USD",
+                    forzar_actualizacion=forzar_actualizacion,
+                )
+
+        for inv in inversiones:
+            if not incluir_todas_convertidas and inv.moneda != mon_dest:
+                continue
+
+            cot = cotizaciones_por_simbolo.get(inv.simbolo)
+            desde_cache_item = False
+            fecha_cot = inv.fecha_compra
+
+            if cot is not None and cot.precio > Decimal("0"):
+                desde_cache_item = "Caché" in (cot.fuente or "")
+                fecha_cot = cot.fecha
+                if inv.moneda == cot.moneda:
+                    precio_actual_moneda_inv = cot.precio
+                else:
+                    try:
+                        precio_actual_moneda_inv = self.convertir_entre_monedas(
+                            cot.precio, cot.moneda, inv.moneda
+                        )
+                    except ErrorValidacion:
+                        precio_actual_moneda_inv = inv.precio_compra
+            else:
+                desde_cache_item = True
+                precio_actual_moneda_inv = inv.precio_compra
+
+            if desde_cache_item:
+                usando_cache = True
+
+            valor_actual_nativo = (inv.cantidad_titulos * precio_actual_moneda_inv).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            ganancia_nativa = (valor_actual_nativo - inv.monto_invertido).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            rendimiento_pct = (
+                ((ganancia_nativa / inv.monto_invertido) * Decimal("100")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                if inv.monto_invertido > Decimal("0")
+                else Decimal("0.00")
+            )
+
+            if inv.moneda == mon_dest:
+                monto_inv_conv = inv.monto_invertido
+                valor_act_conv = valor_actual_nativo
+            else:
+                try:
+                    monto_inv_conv = self.convertir_entre_monedas(
+                        inv.monto_invertido, inv.moneda, mon_dest
+                    )
+                    valor_act_conv = self.convertir_entre_monedas(
+                        valor_actual_nativo, inv.moneda, mon_dest
+                    )
+                except ErrorValidacion:
+                    monto_inv_conv = inv.monto_invertido
+                    valor_act_conv = valor_actual_nativo
+
+            ganancia_conv = (valor_act_conv - monto_inv_conv).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+
+            capital_total += monto_inv_conv
+            valor_actual_total += valor_act_conv
+
+            posiciones.append(
+                ValoracionInversion(
+                    inversion=inv,
+                    precio_actual=precio_actual_moneda_inv,
+                    valor_actual=valor_actual_nativo,
+                    ganancia_perdida=ganancia_nativa,
+                    rendimiento_porcentaje=rendimiento_pct,
+                    moneda_visualizacion=mon_dest,
+                    monto_invertido_convertido=monto_inv_conv,
+                    valor_actual_convertido=valor_act_conv,
+                    ganancia_perdida_convertida=ganancia_conv,
+                    desde_cache=desde_cache_item,
+                    fecha_cotizacion=fecha_cot,
+                )
+            )
+
+        ganancia_neta_total = (valor_actual_total - capital_total).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        rendimiento_total_pct = (
+            ((ganancia_neta_total / capital_total) * Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if capital_total > Decimal("0")
+            else Decimal("0.00")
+        )
+
+        return {
+            "posiciones": posiciones,
+            "capital_invertido": capital_total,
+            "valor_actual_mercado": valor_actual_total,
+            "ganancia_perdida_neta": ganancia_neta_total,
+            "rendimiento_porcentaje": rendimiento_total_pct,
+            "en_ganancia": ganancia_neta_total >= Decimal("0"),
+            "desde_cache": usando_cache,
+            "moneda": mon_dest,
+        }
+
+    def obtener_serie_montana_portafolio(
+        self,
+        marco_tiempo: str = "1M",
+        simbolo_filtro: Optional[str] = None,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = True,
+    ) -> Dict[str, object]:
+        """Construye la serie histórica `(etiqueta, valor)` para renderizar el gráfico estilo
+        montaña (eToro / Robinhood) en los marcos `1D`, `1W`, `1M`, `1Y`."""
+        mon_dest = self._validar_moneda(moneda_objetivo)
+        valoracion = self.valorar_portafolio(
+            moneda_objetivo=mon_dest,
+            incluir_todas_convertidas=incluir_todas_convertidas,
+            forzar_actualizacion=False,
+        )
+        posiciones: List[ValoracionInversion] = valoracion["posiciones"]  # type: ignore[assignment]
+        if simbolo_filtro:
+            sim_up = simbolo_filtro.strip().upper()
+            posiciones = [p for p in posiciones if p.inversion.simbolo == sim_up]
+
+        if not posiciones:
+            return {
+                "puntos": [],
+                "en_ganancia": True,
+                "cambio_absoluto": Decimal("0.00"),
+                "cambio_porcentaje": Decimal("0.00"),
+                "valor_inicial": Decimal("0.00"),
+                "valor_final": Decimal("0.00"),
+            }
+
+        # Intentar construir la curva real sumando las series históricas de cada activo
+        series_por_simbolo: Dict[str, List[Tuple[str, Decimal]]] = {}
+        for pos in posiciones:
+            sim = pos.inversion.simbolo
+            if sim not in series_por_simbolo:
+                try:
+                    series_por_simbolo[sim] = self._servicio_bursatil.consultar_serie_temporal(
+                        sim, marco_tiempo=marco_tiempo
+                    )
+                except Exception:
+                    series_por_simbolo[sim] = []
+
+        # Factor de conversión USD -> mon_dest
+        tasa_usd_dest = Decimal("1.00")
+        if mon_dest != "USD":
+            cot_fx = self.obtener_tasa_cambio("USD", mon_dest)
+            if cot_fx is not None and cot_fx.precio > Decimal("0"):
+                tasa_usd_dest = cot_fx.precio
+
+        # Si hay al menos una serie con datos reales de Yahoo Finance, agregamos punto por punto
+        serie_base = next((s for s in series_por_simbolo.values() if len(s) >= 2), None)
+        puntos_curva: List[Tuple[str, Decimal]] = []
+
+        if serie_base is not None:
+            num_puntos = len(serie_base)
+            for idx in range(num_puntos):
+                etiqueta_t = serie_base[idx][0]
+                suma_punto = Decimal("0")
+                for pos in posiciones:
+                    serie_act = series_por_simbolo.get(pos.inversion.simbolo, [])
+                    if serie_act:
+                        i_efectivo = min(idx, len(serie_act) - 1)
+                        precio_usd = serie_act[i_efectivo][1]
+                        # Cantidad equivalente en USD o moneda nativa
+                        if pos.inversion.moneda == "USD":
+                            val_usd = pos.inversion.cantidad_titulos * precio_usd
+                            suma_punto += (val_usd * tasa_usd_dest)
+                        else:
+                            # Escalar proporcionalmente respecto al último precio de la serie
+                            ultimo_p = serie_act[-1][1]
+                            factor = (precio_usd / ultimo_p) if ultimo_p > Decimal("0") else Decimal("1")
+                            suma_punto += (pos.valor_actual_convertido * factor)
+                    else:
+                        suma_punto += pos.valor_actual_convertido
+                puntos_curva.append(
+                    (etiqueta_t, suma_punto.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                )
+        else:
+            # Respaldo determinista cuando no hay conexión (interpola entre capital invertido y valor actual)
+            cap_ini = sum((p.monto_invertido_convertido for p in posiciones), Decimal("0"))
+            val_fin = sum((p.valor_actual_convertido for p in posiciones), Decimal("0"))
+            pesos = [0.0, 0.18, 0.12, 0.35, 0.28, 0.52, 0.48, 0.72, 0.68, 0.88, 0.94, 1.0]
+            diferencia = val_fin - cap_ini
+            # Si cap_ini == val_fin, mostrar ligera oscilación alrededor de cap_ini
+            amplitud = diferencia if diferencia != Decimal("0") else (cap_ini * Decimal("0.015"))
+            for idx, w in enumerate(pesos):
+                if diferencia != Decimal("0"):
+                    v = cap_ini + (diferencia * Decimal(str(w)))
+                else:
+                    ond = Decimal(str((w - 0.5) * 0.4))
+                    v = cap_ini + (amplitud * ond) if idx < len(pesos) - 1 else val_fin
+                puntos_curva.append(
+                    (f"P{idx + 1}", v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                )
+
+        valor_inicial = puntos_curva[0][1]
+        valor_final = puntos_curva[-1][1]
+        cambio_abs = (valor_final - valor_inicial).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        cambio_pct = (
+            ((cambio_abs / valor_inicial) * Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if valor_inicial > Decimal("0")
+            else Decimal("0.00")
+        )
+
+        return {
+            "puntos": puntos_curva,
+            "en_ganancia": cambio_abs >= Decimal("0"),
+            "cambio_absoluto": cambio_abs,
+            "cambio_porcentaje": cambio_pct,
+            "valor_inicial": valor_inicial,
+            "valor_final": valor_final,
+        }
 
     # ------------------------------------------------------------------
     # Validaciones internas

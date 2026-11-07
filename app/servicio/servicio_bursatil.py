@@ -5,8 +5,8 @@ Incluye:
   ni contaminar el caché negativo de símbolos cuando el equipo está sin red (offline).
 - Soporte para el formato oficial de divisas en Yahoo Finance: pares con USD usan el ticker corto
   '{CODIGO}=X' (ej. 'BGN=X', 'COP=X', 'EUR=X') además de 'USDCOP=X'.
-- Excepción específica `ErrorSinConexionInternet` para distinguir fallos por falta de internet
-  de símbolos inexistentes.
+- Búsqueda de acciones y ETFs (`buscar_activos_bursatiles`) y consulta de series temporales
+  (`consultar_serie_temporal`) para la gráfica de montaña estilo eToro/Robinhood (`1D`, `1W`, `1M`, `1Y`).
 """
 
 from datetime import date
@@ -14,15 +14,23 @@ from decimal import Decimal, ROUND_HALF_UP
 import logging
 import socket
 import time
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from app.modelo.cotizacion import Cotizacion
+from app.modelo.inversion import CATALOGO_ACTIVOS_BURSATILES
 
 SIMBOLO_USD_COP = "USDCOP=X"
 
 # Silenciar avisos HTTP 404 / Crumb / DNS internos de yfinance en la terminal
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+
+PARAMETROS_MARCO_TIEMPO: Dict[str, Tuple[str, str]] = {
+    "1D": ("5d", "15m"),
+    "1W": ("5d", "1h"),
+    "1M": ("1mo", "1d"),
+    "1Y": ("1y", "1wk"),
+}
 
 
 class ErrorConsultaBursatil(Exception):
@@ -57,7 +65,7 @@ def _es_error_de_red(error: Exception) -> bool:
 
 
 class ServicioBursatil:
-    """Consulta el precio y tasas de cambio en tiempo real en Yahoo Finance con alta precisión."""
+    """Consulta el precio, series históricas y tasas de cambio en tiempo real en Yahoo Finance."""
 
     def __init__(self, proveedor_yf=None):
         self._yf = proveedor_yf
@@ -67,9 +75,7 @@ class ServicioBursatil:
         self._forzar_sin_conexion: bool = False
 
     def hay_conexion_internet(self, usar_cache_breve: bool = False) -> bool:
-        """Verifica de forma rápida (máx. 1.2s) si hay conexión a internet hacia Yahoo Finance.
-        Si se inyectó un proveedor mock (`self._yf is not None`), devuelve True salvo que se
-        fuerce modo offline en pruebas."""
+        """Verifica de forma rápida (máx. 1.2s) si hay conexión a internet hacia Yahoo Finance."""
         if self._forzar_sin_conexion:
             return False
         if self._yf is not None:
@@ -80,7 +86,6 @@ class ServicioBursatil:
             return self._estado_red_reciente
 
         conectado = False
-        # 1) Intento de conexión TCP rápida a DNS públicos (Cloudflare / Google) sin coste DNS
         for host, puerto in (("1.1.1.1", 53), ("8.8.8.8", 53)):
             try:
                 with socket.create_connection((host, puerto), timeout=1.0):
@@ -89,7 +94,6 @@ class ServicioBursatil:
             except OSError:
                 continue
 
-        # 2) Respaldo: resolución y conexión directa a query1.finance.yahoo.com
         if not conectado:
             try:
                 with socket.create_connection(("query1.finance.yahoo.com", 443), timeout=1.2):
@@ -98,7 +102,6 @@ class ServicioBursatil:
                 conectado = False
 
         if conectado and not self._estado_red_reciente:
-            # Al recuperar internet, limpiamos cualquier símbolo bloqueado temporalmente
             self._simbolos_no_disponibles.clear()
 
         self._estado_red_reciente = conectado
@@ -106,7 +109,6 @@ class ServicioBursatil:
         return conectado
 
     def limpiar_cache_simbolos_no_disponibles(self) -> None:
-        """Limpia la lista de símbolos marcados como no disponibles tras reconectar internet."""
         self._simbolos_no_disponibles.clear()
 
     def _obtener_modulo_yf(self):
@@ -120,11 +122,47 @@ class ServicioBursatil:
                 "La librería 'yfinance' no está instalada. Ejecuta: .venv\\Scripts\\pip install yfinance"
             ) from error
 
+    def buscar_activos_bursatiles(self, consulta: str = "") -> List[Dict[str, str]]:
+        """Busca acciones y ETFs en el catálogo curado y permite buscar cualquier ticker directo
+        en Yahoo Finance (ej. 'QQQ', 'VOO', 'AAPL', 'NVDA', 'AMD', 'NFLX')."""
+        termino = (consulta or "").strip()
+        if not termino:
+            return list(CATALOGO_ACTIVOS_BURSATILES[:10])
+
+        termino_low = termino.lower()
+        termino_up = termino.upper()
+
+        coincidencias: List[Dict[str, str]] = []
+        simbolos_vistos: Set[str] = set()
+
+        for item in CATALOGO_ACTIVOS_BURSATILES:
+            if (
+                termino_low in item["simbolo"].lower()
+                or termino_low in item["nombre"].lower()
+                or termino_low in item["tipo"].lower()
+            ):
+                coincidencias.append(dict(item))
+                simbolos_vistos.add(item["simbolo"].upper())
+
+        # Si el usuario escribió un ticker válido que aún no está en la lista curada, agregar opción directa
+        if (
+            1 <= len(termino_up) <= 10
+            and all(ch.isalnum() or ch in ("-", ".") for ch in termino_up)
+            and termino_up not in simbolos_vistos
+        ):
+            coincidencias.insert(
+                0,
+                {
+                    "simbolo": termino_up,
+                    "nombre": f"{termino_up} (Ticker directo en Yahoo Finance)",
+                    "tipo": "Acción / ETF · Yahoo Finance",
+                    "moneda": "USD",
+                    "bolsa": "Mercado Global",
+                },
+            )
+        return coincidencias[:12]
+
     def _extraer_precio_tiempo_real(self, ticker, simbolo_limpio: str) -> Tuple[float, date]:
-        """Obtiene el precio en tiempo real de forma rápida:
-        1) fast_info['last_price']
-        2) history(period='5d') que incluye el precio en vivo de la sesión actual como última fila.
-        """
         if not self.hay_conexion_internet(usar_cache_breve=True):
             raise ErrorSinConexionInternet(
                 "No tienes conexión a internet para actualizar precios desde Yahoo Finance."
@@ -200,7 +238,7 @@ class ServicioBursatil:
     def consultar_precio_actual(
         self, simbolo: str, moneda_esperada: str = "USD", decimales: str = "0.01"
     ) -> Cotizacion:
-        """Obtiene el precio en tiempo real para un símbolo (ej. 'USDCOP=X', 'BGN=X', 'VOO')."""
+        """Obtiene el precio en tiempo real para un símbolo (ej. 'USDCOP=X', 'BGN=X', 'VOO', 'QQQ')."""
         if not isinstance(simbolo, str) or not simbolo.strip():
             raise ErrorConsultaBursatil("El símbolo bursátil es obligatorio.")
         simbolo_limpio = simbolo.strip().upper()
@@ -242,10 +280,71 @@ class ServicioBursatil:
             fuente="Yahoo Finance (Tiempo real)",
         )
 
+    def consultar_serie_temporal(
+        self, simbolo: str, marco_tiempo: str = "1M"
+    ) -> List[Tuple[str, Decimal]]:
+        """Obtiene la serie de puntos `(etiqueta_fecha, precio)` para la gráfica estilo montaña
+        en los marcos de tiempo `1D`, `1W`, `1M` o `1Y`."""
+        if not isinstance(simbolo, str) or not simbolo.strip():
+            raise ErrorConsultaBursatil("El símbolo bursátil es obligatorio.")
+        if not self.hay_conexion_internet(usar_cache_breve=True):
+            raise ErrorSinConexionInternet(
+                "No tienes conexión a internet para consultar la gráfica histórica."
+            )
+
+        simbolo_limpio = simbolo.strip().upper()
+        tf = (marco_tiempo or "1M").strip().upper()
+        periodo, intervalo = PARAMETROS_MARCO_TIEMPO.get(tf, ("1mo", "1d"))
+        yf = self._obtener_modulo_yf()
+
+        try:
+            ticker = yf.Ticker(simbolo_limpio)
+            try:
+                historial = ticker.history(period=periodo, interval=intervalo)
+            except TypeError:
+                historial = ticker.history(period=periodo)
+            if (historial is None or historial.empty) and intervalo != "1d":
+                historial = ticker.history(period=periodo)
+        except Exception as error:
+            if _es_error_de_red(error) or not self.hay_conexion_internet(usar_cache_breve=False):
+                raise ErrorSinConexionInternet(
+                    "No tienes conexión a internet para consultar la gráfica histórica."
+                ) from error
+            raise ErrorConsultaBursatil(
+                f"Error al consultar serie temporal de '{simbolo_limpio}': {error}"
+            ) from error
+
+        if historial is None or historial.empty or "Close" not in historial:
+            raise ErrorConsultaBursatil(
+                f"Sin datos históricos para '{simbolo_limpio}' ({tf})."
+            )
+
+        puntos: List[Tuple[str, Decimal]] = []
+        for idx, fila in historial.iterrows():
+            val = fila.get("Close")
+            if val is None or val != val:
+                continue
+            precio = Decimal(str(float(val))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if precio <= Decimal("0"):
+                continue
+            if hasattr(idx, "strftime"):
+                etiqueta = idx.strftime("%d/%m %H:%M") if tf in ("1D", "1W") else idx.strftime("%Y-%m-%d")
+            else:
+                etiqueta = str(idx)
+            puntos.append((etiqueta, precio))
+
+        if tf == "1D" and len(puntos) > 28:
+            puntos = puntos[-28:]
+
+        if not puntos:
+            raise ErrorConsultaBursatil(
+                f"No se encontraron puntos válidos para '{simbolo_limpio}'."
+            )
+        return puntos
+
     def _consultar_unidades_por_usd(self, codigo_moneda: str) -> Tuple[Decimal, date]:
-        """Devuelve cuántas unidades de `codigo_moneda` equivalen a 1 USD.
-        En Yahoo Finance la convención estándar es `{CODIGO}=X` (ej. `BGN=X`, `COP=X`, `EUR=X`)
-        o `USD{CODIGO}=X` (ej. `USDCOP=X`)."""
         cod = codigo_moneda.strip().upper()
         if cod == "USD":
             return Decimal("1.00000000"), date.today()
@@ -268,7 +367,6 @@ class ServicioBursatil:
             except ErrorConsultaBursatil:
                 continue
 
-        # Último recurso: par inverso '{CODIGO}USD=X'
         try:
             cot_inv = self.consultar_precio_actual(
                 f"{cod}USD=X", moneda_esperada="USD", decimales="0.00000001"
@@ -287,9 +385,6 @@ class ServicioBursatil:
         )
 
     def consultar_tasa_cambio(self, moneda_origen: str, moneda_destino: str) -> Cotizacion:
-        """Calcula la tasa en tiempo real entre cualquier par de divisas del mundo con 8 decimales.
-        Usa la relación oficial con USD (`{MONEDA}=X` / `USD{MONEDA}=X`) para evitar consultar
-        combinaciones cruzadas inexistentes como `BGNCOP=X`."""
         origen = moneda_origen.strip().upper()
         destino = moneda_destino.strip().upper()
         simbolo_canonico = f"{origen}{destino}=X"
@@ -327,7 +422,6 @@ class ServicioBursatil:
         )
 
     def consultar_tasa_usd_cop(self) -> Cotizacion:
-        """Obtiene la tasa en tiempo real USD -> COP ('USDCOP=X' en Yahoo Finance)."""
         return self.consultar_precio_actual(SIMBOLO_USD_COP, moneda_esperada="COP")
 
     def consultar_historial(
@@ -337,7 +431,6 @@ class ServicioBursatil:
         hasta: Optional[date] = None,
         moneda_esperada: str = "USD",
     ) -> List[Cotizacion]:
-        """Consulta la serie histórica de precios entre dos fechas para gráficas de evolución."""
         if not isinstance(simbolo, str) or not simbolo.strip():
             raise ErrorConsultaBursatil("El símbolo bursátil es obligatorio.")
         if not self.hay_conexion_internet(usar_cache_breve=False):
