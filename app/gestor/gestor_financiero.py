@@ -645,7 +645,10 @@ class GestorFinanciero:
 
         total_ingresos = Decimal("0")
         total_gastos = Decimal("0")
+        ingresos_por_cat: Dict[str, Decimal] = {}
         gastos_por_cat: Dict[str, Decimal] = {}
+        colores_ing = {c.nombre: c.color for c in self.obtener_categorias_detalladas("INGRESO")}
+        colores_gas = {c.nombre: c.color for c in self.obtener_categorias_detalladas("GASTO")}
 
         for mov in movimientos:
             if not incluir_todas_convertidas and mov.moneda != moneda_dest:
@@ -661,6 +664,9 @@ class GestorFinanciero:
 
             if mov.tipo_movimiento == "INGRESO":
                 total_ingresos += monto
+                ingresos_por_cat[mov.categoria] = (
+                    ingresos_por_cat.get(mov.categoria, Decimal("0")) + monto
+                )
             elif mov.tipo_movimiento == "GASTO":
                 total_gastos += monto
                 gastos_por_cat[mov.categoria] = (
@@ -670,7 +676,11 @@ class GestorFinanciero:
         return {
             "ingresos": total_ingresos,
             "gastos": total_gastos,
+            "balance_neto": total_ingresos - total_gastos,
+            "ingresos_por_categoria": ingresos_por_cat,
             "gastos_por_categoria": gastos_por_cat,
+            "colores_ingresos": colores_ing,
+            "colores_gastos": colores_gas,
         }
 
     def resumen_del_mes_en_moneda(
