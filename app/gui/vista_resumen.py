@@ -3,6 +3,7 @@ con eje positivo/negativo (representación invertida bajo cero cuando los gastos
 respetando los colores establecidos de cada categoría, selector de periodo estilo Shopify y filtro mundial de divisas."""
 
 from datetime import date
+import threading
 from decimal import Decimal
 import tkinter as tk
 from typing import Dict, Optional, Tuple
@@ -48,6 +49,7 @@ class VistaResumen(ctk.CTkFrame):
         )
         self._moneda_actual = "COP"
         self._incluir_todas_convertidas = False
+        self._actualizando_inv_bg = False
 
         self._construir_encabezado()
         self._construir_columnas()
@@ -799,22 +801,54 @@ class VistaResumen(ctk.CTkFrame):
             incluir_todas_convertidas=incluir_todas,
         )
 
-        # Valoración dinámica del portafolio de inversiones (integrada en Resumen Financiero)
-        datos_inv = (
-            self._gestor.valorar_portafolio(
-                moneda_objetivo=moneda,
-                incluir_todas_convertidas=True if incluir_todas else False,
-                forzar_actualizacion=False,
-            )
-            if hasattr(self._gestor, "valorar_portafolio")
-            else {
+        # Valoración instantánea desde memoria/caché (0ms en hilo principal) + actualización asíncrona
+        if hasattr(self._gestor, "valorar_portafolio"):
+            try:
+                datos_inv = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=True,
+                    forzar_actualizacion=False,
+                    permitir_red=False,
+                )
+            except TypeError:
+                datos_inv = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=True,
+                    forzar_actualizacion=False,
+                )
+        else:
+            datos_inv = {
                 "posiciones": [],
                 "valor_actual_mercado": Decimal("0"),
                 "ganancia_perdida_neta": Decimal("0"),
                 "rendimiento_porcentaje": Decimal("0"),
                 "en_ganancia": True,
             }
-        )
+
+        if datos_inv.get("faltan_precios_vivos") and not self._actualizando_inv_bg:
+            self._actualizando_inv_bg = True
+
+            def _cargar_inv_vivo_bg():
+                try:
+                    self._gestor.valorar_portafolio(
+                        moneda_objetivo=moneda,
+                        incluir_todas_convertidas=True,
+                        forzar_actualizacion=False,
+                        permitir_red=True,
+                    )
+                    if self.winfo_exists():
+                        self.after(
+                            0,
+                            lambda: self._actualizar_panel_cuentas(
+                                self._moneda_actual, self._incluir_todas_convertidas
+                            ),
+                        )
+                except Exception:
+                    pass
+                finally:
+                    self._actualizando_inv_bg = False
+
+            threading.Thread(target=_cargar_inv_vivo_bg, daemon=True).start()
         valor_inversiones: Decimal = datos_inv.get("valor_actual_mercado", Decimal("0"))
         ganancia_inv: Decimal = datos_inv.get("ganancia_perdida_neta", Decimal("0"))
         rend_inv_pct: Decimal = datos_inv.get("rendimiento_porcentaje", Decimal("0"))

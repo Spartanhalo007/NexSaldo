@@ -1,5 +1,5 @@
 -- Esquema de base de datos local para NexSaldo
--- Incluye tablas originales, Módulo de Gastos, Módulo de Ingresos, Divisas Mundiales y Cotizaciones en tiempo real
+-- Incluye tablas originales, Módulo de Gastos, Módulo de Ingresos, Módulo de Inversiones, Divisas Mundiales y Cotizaciones en tiempo real
 
 CREATE TABLE IF NOT EXISTS categoria (
     id SERIAL PRIMARY KEY,
@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS cotizacion (
 
 ALTER TABLE cotizacion ALTER COLUMN precio TYPE NUMERIC(20,8);
 DELETE FROM cotizacion WHERE precio < 0.01;
+
+-- Tabla de Inversiones Bursátiles (Acciones, ETFs y Fondos)
+CREATE TABLE IF NOT EXISTS inversion (
+    id SERIAL PRIMARY KEY,
+    simbolo VARCHAR(20) NOT NULL,
+    nombre VARCHAR(100) NOT NULL,
+    monto_invertido NUMERIC(16,2) NOT NULL CHECK (monto_invertido > 0),
+    moneda CHAR(3) NOT NULL DEFAULT 'USD',
+    precio_compra NUMERIC(20,8) NOT NULL CHECK (precio_compra > 0),
+    cantidad_titulos NUMERIC(20,8) NOT NULL CHECK (cantidad_titulos > 0),
+    fecha_compra DATE NOT NULL DEFAULT CURRENT_DATE,
+    cuenta_id INTEGER REFERENCES cuenta(id) ON DELETE SET NULL,
+    notas VARCHAR(200),
+    fecha_registro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Categorías predeterminadas de GASTOS e INGRESOS
 INSERT INTO categoria (nombre, tipo, simbolo, color, es_predeterminada) VALUES

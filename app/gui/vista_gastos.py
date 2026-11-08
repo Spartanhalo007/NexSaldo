@@ -2,6 +2,7 @@
 (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`) y filtro de todas las divisas del mundo."""
 
 from datetime import date
+import threading
 from decimal import Decimal
 import tkinter as tk
 from tkinter import messagebox
@@ -247,7 +248,10 @@ class VistaGastos(ctk.CTkFrame):
     # ------------------------------------------------------------------
     # Gráfica Circular (Dona) y Actualización de Datos
     # ------------------------------------------------------------------
-    def _refrescar_vista(self):
+    def refrescar(self):
+        self._refrescar_vista()
+
+    def _refrescar_vista(self, _desde_hilo_tasas: bool = False):
         fecha_ini = self._fecha_inicio
         fecha_fin = self._fecha_fin
         sufijo_modo = (
@@ -258,6 +262,31 @@ class VistaGastos(ctk.CTkFrame):
         self._titulo_rango.configure(
             text=f"Gastos · {self._texto_periodo} ({sufijo_modo})"
         )
+
+        todos_movimientos = self._gestor.obtener_movimientos(
+            "GASTO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+        )
+        if self._incluir_todas_convertidas and not _desde_hilo_tasas and hasattr(self._gestor, "tiene_tasa_en_sesion"):
+            monedas_faltantes = {
+                m.moneda
+                for m in todos_movimientos
+                if m.moneda != self._moneda_grafica
+                and not self._gestor.tiene_tasa_en_sesion(m.moneda, self._moneda_grafica)
+            }
+            if monedas_faltantes:
+                mon_dest_bg = self._moneda_grafica
+
+                def _precargar_tasas():
+                    for mon_orig in monedas_faltantes:
+                        try:
+                            self._gestor.obtener_tasa_cambio(mon_orig, mon_dest_bg, forzar_actualizacion=False)
+                        except Exception:
+                            pass
+                    if self.winfo_exists():
+                        self.after(0, lambda: self._refrescar_vista(_desde_hilo_tasas=True))
+
+                threading.Thread(target=_precargar_tasas, daemon=True).start()
+                return
 
         resumen_global = self._gestor.resumen_gastos_periodo(
             fecha_inicio=fecha_ini,
@@ -276,7 +305,7 @@ class VistaGastos(ctk.CTkFrame):
 
         self._dibujar_dona(total, por_cat, colores)
         self._renderizar_desglose(total, por_cat, colores, simbolos)
-        self._renderizar_historial(fecha_ini, fecha_fin)
+        self._renderizar_historial(fecha_ini, fecha_fin, movimientos_precargados=todos_movimientos)
 
     def _dibujar_dona(
         self,
@@ -430,13 +459,20 @@ class VistaGastos(ctk.CTkFrame):
             ).pack(side="right", padx=6)
 
     def _renderizar_historial(
-        self, fecha_ini: Optional[date], fecha_fin: Optional[date]
+        self,
+        fecha_ini: Optional[date],
+        fecha_fin: Optional[date],
+        movimientos_precargados=None,
     ):
         for hijo in self._contenedor_historial.winfo_children():
             hijo.destroy()
 
-        todos_movimientos = self._gestor.obtener_movimientos(
-            "GASTO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+        todos_movimientos = (
+            movimientos_precargados
+            if movimientos_precargados is not None
+            else self._gestor.obtener_movimientos(
+                "GASTO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+            )
         )
         if self._incluir_todas_convertidas:
             movimientos = todos_movimientos
