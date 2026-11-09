@@ -1,7 +1,7 @@
 """Envuelve VistaCuentas, VistaMovimientos y DialogoCuenta para inyectar:
 1) El filtro mundial de divisas (COP + 4 últimas usadas + lista A-Z) y el modo
    'Solo esta moneda' vs 'Todo convertido'.
-2) El selector de periodo estilo Shopify (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`) exactamente
+2) El selector de periodo estilo píldora de fechas (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`) exactamente
    dentro de la tarjeta 'Historial de transferencias' en Cuentas (donde estaban los radio
    buttons 'Mostrar: Día, Semana, Mes, Año, Período') y en Ingresos."""
 
@@ -10,8 +10,8 @@ from decimal import Decimal
 import customtkinter as ctk
 
 from app.gui.dialogo_cuenta import DialogoCuenta
-from app.gui.dialogo_periodo_shopify import (
-    DialogoPeriodoShopify,
+from app.gui.dialogo_periodo import (
+    DialogoPeriodo,
     calcular_rango_preset,
     desplazar_rango,
 )
@@ -100,32 +100,32 @@ def _encontrar_fila_radios_historial(vista_cuentas: VistaCuentas):
 class VistaCuentasConDivisa(VistaCuentas):
     """Subclase de VistaCuentas que añade la BarraFiltroMoneda arriba y reemplaza la fila
     de radio buttons ('Mostrar: Dia, Semana, Mes, Año, Periodo') dentro de la tarjeta
-    'Historial de transferencias' por el selector clicable estilo Shopify."""
+    'Historial de transferencias' por el selector clicable estilo píldora de fechas."""
 
     def __init__(self, master, gestor, **kwargs):
         activar_selector_mundial_en_dialogo_cuenta()
         hoy = date.today()
-        self._preset_shopify = "ESTE_MES"
-        self._ini_shopify, self._fin_shopify, self._texto_shopify = calcular_rango_preset(
+        self._preset_periodo = "ESTE_MES"
+        self._ini_periodo, self._fin_periodo, self._texto_periodo = calcular_rango_preset(
             "ESTE_MES", referencia=hoy
         )
         self._moneda_filtro = "COP"
         self._incluir_todas_convertidas = False
         self._barra_moneda = None
-        self._boton_periodo_shopify = None
+        self._boton_periodo = None
         self._etiqueta_total_convertido = None
         super().__init__(master, gestor, **kwargs)
-        self._fecha_desde = self._ini_shopify
-        self._fecha_hasta = self._fin_shopify
+        self._fecha_desde = self._ini_periodo
+        self._fecha_hasta = self._fin_periodo
         self._inyectar_barra_moneda_y_periodo()
         self.refrescar()
 
     def _rango_del_filtro(self):
-        """Devuelve siempre el rango activo seleccionado en el control estilo Shopify."""
-        return self._ini_shopify, self._fin_shopify
+        """Devuelve siempre el rango activo seleccionado en el control estilo píldora de fechas."""
+        return self._ini_periodo, self._fin_periodo
 
     def _inyectar_barra_moneda_y_periodo(self):
-        # 1. En la tarjeta "Historial de transferencias", reemplazar los radio buttons por el selector Shopify
+        # 1. En la tarjeta "Historial de transferencias", reemplazar los radio buttons por el selector de período
         if hasattr(self, "_marco_periodo") and self._marco_periodo is not None:
             try:
                 self._marco_periodo.pack_forget()
@@ -157,12 +157,12 @@ class VistaCuentasConDivisa(VistaCuentas):
                 hover_color=COLORES["hover_lateral"],
                 text_color=COLORES["texto"],
                 font=(FUENTE, 12, "bold"),
-                command=lambda: self._desplazar_periodo_shopify(-1),
+                command=lambda: self._desplazar_periodo(-1),
             ).pack(side="left", padx=3, pady=4)
 
-            self._boton_periodo_shopify = ctk.CTkButton(
+            self._boton_periodo = ctk.CTkButton(
                 fila_filtros_historial,
-                text=f"📅  {self._texto_shopify}  ▾",
+                text=f"📅  {self._texto_periodo}  ▾",
                 height=30,
                 corner_radius=8,
                 fg_color=COLORES["boton_lateral"],
@@ -171,9 +171,9 @@ class VistaCuentasConDivisa(VistaCuentas):
                 border_color=COLORES["acento"],
                 text_color=COLORES["texto"],
                 font=(FUENTE, 12, "bold"),
-                command=self._abrir_selector_periodo_shopify,
+                command=self._abrir_selector_periodo,
             )
-            self._boton_periodo_shopify.pack(side="left", padx=4, pady=4)
+            self._boton_periodo.pack(side="left", padx=4, pady=4)
 
             ctk.CTkButton(
                 fila_filtros_historial,
@@ -185,7 +185,7 @@ class VistaCuentasConDivisa(VistaCuentas):
                 hover_color=COLORES["hover_lateral"],
                 text_color=COLORES["texto"],
                 font=(FUENTE, 12, "bold"),
-                command=lambda: self._desplazar_periodo_shopify(1),
+                command=lambda: self._desplazar_periodo(1),
             ).pack(side="left", padx=3, pady=4)
 
         # 2. Barra superior de filtro de moneda (COP + 4 últimas + Todas A-Z)
@@ -218,39 +218,39 @@ class VistaCuentasConDivisa(VistaCuentas):
         )
         self._etiqueta_total_convertido.pack(side="right", padx=10)
 
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
-            fecha_inicio=self._ini_shopify,
-            fecha_fin=self._fin_shopify,
-            preset_inicial=self._preset_shopify,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            fecha_inicio=self._ini_periodo,
+            fecha_fin=self._fin_periodo,
+            preset_inicial=self._preset_periodo,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
-        self._ini_shopify = fecha_ini
-        self._fin_shopify = fecha_fin
-        self._preset_shopify = preset
-        self._texto_shopify = etiqueta
+        self._ini_periodo = fecha_ini
+        self._fin_periodo = fecha_fin
+        self._preset_periodo = preset
+        self._texto_periodo = etiqueta
         self._fecha_desde = fecha_ini
         self._fecha_hasta = fecha_fin
-        if self._boton_periodo_shopify is not None:
-            self._boton_periodo_shopify.configure(text=f"📅  {self._texto_shopify}  ▾")
+        if self._boton_periodo is not None:
+            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
         self._refrescar_historial()
 
-    def _desplazar_periodo_shopify(self, direccion: int):
+    def _desplazar_periodo(self, direccion: int):
         ini, fin, etiqueta = desplazar_rango(
-            self._preset_shopify, self._ini_shopify, self._fin_shopify, direccion
+            self._preset_periodo, self._ini_periodo, self._fin_periodo, direccion
         )
-        self._ini_shopify = ini
-        self._fin_shopify = fin
-        self._texto_shopify = etiqueta
+        self._ini_periodo = ini
+        self._fin_periodo = fin
+        self._texto_periodo = etiqueta
         self._fecha_desde = ini
         self._fecha_hasta = fin
-        if self._boton_periodo_shopify is not None:
-            self._boton_periodo_shopify.configure(text=f"📅  {self._texto_shopify}  ▾")
+        if self._boton_periodo is not None:
+            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
         self._refrescar_historial()
 
     def _al_cambiar_moneda_vista(self, nueva_moneda: str, incluir_todas: bool):
@@ -259,7 +259,7 @@ class VistaCuentasConDivisa(VistaCuentas):
         self.refrescar()
 
     def _refrescar_historial(self):
-        """Consulta las transferencias en el rango Shopify activo y aplica el filtro/conversión de moneda."""
+        """Consulta las transferencias en el rango de período activo y aplica el filtro/conversión de moneda."""
         inicio, fin = self._rango_del_filtro()
         try:
             transferencias = self._gestor.obtener_transferencias(inicio, fin)
@@ -351,18 +351,18 @@ class VistaCuentasConDivisa(VistaCuentas):
 
 class VistaMovimientosConDivisa(VistaMovimientos):
     """Subclase de VistaMovimientos (Ingresos) que añade el selector mundial de divisas y el
-    selector de periodo estilo Shopify (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`)."""
+    selector de periodo estilo píldora de fechas (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`)."""
 
     def __init__(self, master, gestor, filtro_tipo=None, titulo="Movimientos", **kwargs):
         hoy = date.today()
-        self._preset_shopify = "ESTE_MES"
-        self._ini_shopify, self._fin_shopify, self._texto_shopify = calcular_rango_preset(
+        self._preset_periodo = "ESTE_MES"
+        self._ini_periodo, self._fin_periodo, self._texto_periodo = calcular_rango_preset(
             "ESTE_MES", referencia=hoy
         )
         self._moneda_filtro = "COP"
         self._incluir_todas_convertidas = False
         self._barra_moneda = None
-        self._boton_periodo_shopify = None
+        self._boton_periodo = None
         super().__init__(
             master, gestor, filtro_tipo=filtro_tipo, titulo=titulo, **kwargs
         )
@@ -398,11 +398,11 @@ class VistaMovimientosConDivisa(VistaMovimientos):
         )
         self._barra_moneda.pack(side="left")
 
-        marco_shopify = ctk.CTkFrame(fila, fg_color="transparent")
-        marco_shopify.pack(side="right")
+        marco_periodo = ctk.CTkFrame(fila, fg_color="transparent")
+        marco_periodo.pack(side="right")
 
         ctk.CTkButton(
-            marco_shopify,
+            marco_periodo,
             text="◀",
             width=32,
             height=32,
@@ -411,12 +411,12 @@ class VistaMovimientosConDivisa(VistaMovimientos):
             hover_color=COLORES["hover_lateral"],
             text_color=COLORES["texto"],
             font=(FUENTE, 12, "bold"),
-            command=lambda: self._desplazar_periodo_shopify(-1),
+            command=lambda: self._desplazar_periodo(-1),
         ).pack(side="left", padx=3)
 
-        self._boton_periodo_shopify = ctk.CTkButton(
-            marco_shopify,
-            text=f"📅  {self._texto_shopify}  ▾",
+        self._boton_periodo = ctk.CTkButton(
+            marco_periodo,
+            text=f"📅  {self._texto_periodo}  ▾",
             height=32,
             corner_radius=8,
             fg_color=COLORES["boton_lateral"],
@@ -425,12 +425,12 @@ class VistaMovimientosConDivisa(VistaMovimientos):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 12, "bold"),
-            command=self._abrir_selector_periodo_shopify,
+            command=self._abrir_selector_periodo,
         )
-        self._boton_periodo_shopify.pack(side="left", padx=4)
+        self._boton_periodo.pack(side="left", padx=4)
 
         ctk.CTkButton(
-            marco_shopify,
+            marco_periodo,
             text="▶",
             width=32,
             height=32,
@@ -439,38 +439,38 @@ class VistaMovimientosConDivisa(VistaMovimientos):
             hover_color=COLORES["hover_lateral"],
             text_color=COLORES["texto"],
             font=(FUENTE, 12, "bold"),
-            command=lambda: self._desplazar_periodo_shopify(1),
+            command=lambda: self._desplazar_periodo(1),
         ).pack(side="left", padx=3)
 
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
-            fecha_inicio=self._ini_shopify,
-            fecha_fin=self._fin_shopify,
-            preset_inicial=self._preset_shopify,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            fecha_inicio=self._ini_periodo,
+            fecha_fin=self._fin_periodo,
+            preset_inicial=self._preset_periodo,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
-        self._ini_shopify = fecha_ini
-        self._fin_shopify = fecha_fin
-        self._preset_shopify = preset
-        self._texto_shopify = etiqueta
-        if self._boton_periodo_shopify is not None:
-            self._boton_periodo_shopify.configure(text=f"📅  {self._texto_shopify}  ▾")
+        self._ini_periodo = fecha_ini
+        self._fin_periodo = fecha_fin
+        self._preset_periodo = preset
+        self._texto_periodo = etiqueta
+        if self._boton_periodo is not None:
+            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
         self.refrescar()
 
-    def _desplazar_periodo_shopify(self, direccion: int):
+    def _desplazar_periodo(self, direccion: int):
         ini, fin, etiqueta = desplazar_rango(
-            self._preset_shopify, self._ini_shopify, self._fin_shopify, direccion
+            self._preset_periodo, self._ini_periodo, self._fin_periodo, direccion
         )
-        self._ini_shopify = ini
-        self._fin_shopify = fin
-        self._texto_shopify = etiqueta
-        if self._boton_periodo_shopify is not None:
-            self._boton_periodo_shopify.configure(text=f"📅  {self._texto_shopify}  ▾")
+        self._ini_periodo = ini
+        self._fin_periodo = fin
+        self._texto_periodo = etiqueta
+        if self._boton_periodo is not None:
+            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
         self.refrescar()
 
     def _al_cambiar_moneda_vista(self, nueva_moneda: str, incluir_todas: bool):
@@ -497,8 +497,8 @@ class VistaMovimientosConDivisa(VistaMovimientos):
         try:
             todos = self._gestor.obtener_movimientos(
                 self._filtro_tipo,
-                fecha_inicio=self._ini_shopify,
-                fecha_fin=self._fin_shopify,
+                fecha_inicio=self._ini_periodo,
+                fecha_fin=self._fin_periodo,
             )
         except Exception:
             return super().refrescar()
@@ -544,13 +544,13 @@ class VistaMovimientosConDivisa(VistaMovimientos):
 
         if not movimientos:
             self._etiqueta_totales.configure(
-                text=f"Sin movimientos en {self._moneda_filtro} ({self._texto_shopify})."
+                text=f"Sin movimientos en {self._moneda_filtro} ({self._texto_periodo})."
             )
         elif self._incluir_todas_convertidas:
             self._etiqueta_totales.configure(
-                text=f"Total unificado ({self._moneda_filtro} · {self._texto_shopify}): {formatear_valor(total_convertido, self._moneda_filtro)}"
+                text=f"Total unificado ({self._moneda_filtro} · {self._texto_periodo}): {formatear_valor(total_convertido, self._moneda_filtro)}"
             )
         else:
             self._etiqueta_totales.configure(
-                text=f"Total solo {self._moneda_filtro} ({self._texto_shopify}): {formatear_valor(total_convertido, self._moneda_filtro)}"
+                text=f"Total solo {self._moneda_filtro} ({self._texto_periodo}): {formatear_valor(total_convertido, self._moneda_filtro)}"
             )

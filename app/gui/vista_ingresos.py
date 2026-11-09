@@ -1,4 +1,4 @@
-"""Vista principal del Módulo de Ingresos para NexSaldo con selector de periodo estilo Shopify
+"""Vista principal del Módulo de Ingresos para NexSaldo con selector de periodo estilo píldora de fechas
 (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`), filtro mundial de divisas ('Solo esta moneda' vs 'Todo convertido'),
 gráfica circular de ingresos, desglose por categoría e historial detallado."""
 
@@ -12,8 +12,8 @@ import customtkinter as ctk
 
 from app.gestor.gestor_financiero import GestorFinanciero
 from app.gui.dialogo_ingreso import DialogoIngreso
-from app.gui.dialogo_periodo_shopify import (
-    DialogoPeriodoShopify,
+from app.gui.dialogo_periodo import (
+    DialogoPeriodo,
     calcular_rango_preset,
     desplazar_rango,
 )
@@ -27,7 +27,7 @@ GROSOR_DONA = 34
 
 
 class VistaIngresos(ctk.CTkFrame):
-    """Muestra la gráfica circular de ingresos por periodo usando el selector clicable estilo Shopify,
+    """Muestra la gráfica circular de ingresos por periodo usando el selector clicable estilo píldora de fechas,
     el filtro mundial de divisas ('Solo esta moneda' o 'Todo convertido'), el botón amarillo
     'Añadir ingreso', el desglose 'Ingresos por categoría en el periodo' y la lista
     'Movimientos de ingresos registrados en este periodo'."""
@@ -52,7 +52,7 @@ class VistaIngresos(ctk.CTkFrame):
         contenedor.pack(fill="both", expand=True, padx=24, pady=18)
 
         # ==================================================================
-        # 1. CABECERA, SELECTOR DE PERIODO ESTILO SHOPIFY Y BOTÓN AMARILLO "Añadir ingreso"
+        # 1. CABECERA, SELECTOR DE PERIODO ESTILO PÍLDORA DE FECHAS Y BOTÓN AMARILLO "Añadir ingreso"
         # ==================================================================
         fila_superior = ctk.CTkFrame(contenedor, fg_color="transparent")
         fila_superior.pack(fill="x", pady=(0, 10))
@@ -104,7 +104,7 @@ class VistaIngresos(ctk.CTkFrame):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 13, "bold"),
-            command=self._abrir_selector_periodo_shopify,
+            command=self._abrir_selector_periodo,
         )
         self._boton_periodo.pack(side="left", padx=6)
 
@@ -209,18 +209,18 @@ class VistaIngresos(ctk.CTkFrame):
         self._contenedor_historial.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
     # ------------------------------------------------------------------
-    # Manejo del Selector de Periodo estilo Shopify y Moneda
+    # Manejo del Selector de Periodo estilo píldora de fechas y Moneda
     # ------------------------------------------------------------------
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
             fecha_inicio=self._fecha_inicio,
             fecha_fin=self._fecha_fin,
             preset_inicial=self._preset_periodo,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
         self._fecha_inicio = fecha_ini

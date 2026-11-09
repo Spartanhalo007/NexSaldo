@@ -1,6 +1,6 @@
 """Vista de Resumen Financiero con gráfica combinada de Ingresos (+), Gastos (-) y Balance Neto
 con eje positivo/negativo (representación invertida bajo cero cuando los gastos superan a los ingresos),
-respetando los colores establecidos de cada categoría, selector de periodo estilo Shopify y filtro mundial de divisas."""
+respetando los colores establecidos de cada categoría, selector de periodo estilo píldora de fechas y filtro mundial de divisas."""
 
 from datetime import date
 import threading
@@ -9,8 +9,8 @@ import tkinter as tk
 from typing import Dict, Optional, Tuple
 import customtkinter as ctk
 
-from app.gui.dialogo_periodo_shopify import (
-    DialogoPeriodoShopify,
+from app.gui.dialogo_periodo import (
+    DialogoPeriodo,
     calcular_rango_preset,
     desplazar_rango,
 )
@@ -97,7 +97,7 @@ class VistaResumen(ctk.CTkFrame):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 13, "bold"),
-            command=self._abrir_selector_periodo_shopify,
+            command=self._abrir_selector_periodo,
         )
         self._boton_periodo.pack(side="left", padx=6)
 
@@ -244,18 +244,18 @@ class VistaResumen(ctk.CTkFrame):
         )
 
     # ------------------------------------------------------------------
-    # Navegación de Periodo y Popup estilo Shopify
+    # Navegación de Periodo y Popup estilo píldora de fechas
     # ------------------------------------------------------------------
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
             fecha_inicio=self._fecha_inicio,
             fecha_fin=self._fecha_fin,
             preset_inicial=self._preset_periodo,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
         self._fecha_inicio = fecha_ini

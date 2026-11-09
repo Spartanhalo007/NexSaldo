@@ -6,7 +6,7 @@ Incluye:
 2. Modal de asignación de portafolio (`DialogoAsignarInversion`) que distingue entre un ticker
    inexistente/incompleto cuando hay internet vs. falta real de conexión a internet.
 3. Valoración dinámica en tiempo real con indicadores de ganancia (▲ verde) o pérdida (▼ rojo).
-4. Gráfica de rendimiento estilo montaña (formato eToro / Robinhood) con selectores de temporalidad
+4. Gráfica de rendimiento estilo montaña (formato eToro) con selectores de temporalidad
    (`1D`, `1W`, `1M`, `1Y`), degradado bajo la curva adaptable a tendencia positiva/negativa y crosshair interactivo.
 """
 
@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import customtkinter as ctk
 
 from app.gestor.gestor_financiero import ErrorValidacion, GestorFinanciero
+from app.servicio.importadores import BROKERS
 from app.gui.calendario import SelectorCalendario
 from app.gui.campo_moneda import CampoMoneda
 from app.gui.estilos import COLORES, FUENTE
@@ -470,25 +471,89 @@ class DialogoAsignarInversion(ctk.CTkToplevel):
 
 
 
-class DialogoImportarEtoro(ctk.CTkToplevel):
-    """Modal interactivo para importar todas las posiciones abiertas desde el Estado de Cuenta
-    Excel (.xlsx) de eToro o desde un archivo CSV."""
+class DialogoElegirBroker(ctk.CTkToplevel):
+    """Menú para elegir desde qué plataforma se importa el portafolio.
+
+    Muestra las 5 plataformas más usadas en Colombia. Al elegir una, abre
+    el diálogo de importación con las instrucciones propias de esa
+    plataforma.
+    """
+
+    # Orden acordado: las más usadas en Colombia primero.
+    CLAVES_BROKERS = ("etoro", "binance", "trii", "hapi", "ibkr")
+
+    def __init__(self, master, gestor, al_importar, **kwargs):
+        super().__init__(master, **kwargs)
+        self._gestor = gestor
+        self._al_importar = al_importar
+
+        self.title("Importar portafolio")
+        self.geometry("460x430")
+        self.resizable(False, False)
+        self.configure(fg_color=COLORES["fondo_lateral"])
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        ctk.CTkLabel(
+            self,
+            text="📥 ¿Desde qué plataforma quieres importar?",
+            font=(FUENTE, 17, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(anchor="w", padx=20, pady=(18, 10))
+
+        for clave in self.CLAVES_BROKERS:
+            config = BROKERS[clave]
+            ctk.CTkButton(
+                self,
+                text=str(config["nombre"]),
+                width=400,
+                height=52,
+                corner_radius=10,
+                anchor="w",
+                fg_color=COLORES["boton_lateral"],
+                hover_color=COLORES["hover_lateral"],
+                border_width=1,
+                border_color=COLORES["acento"],
+                text_color=COLORES["texto"],
+                font=(FUENTE, 14, "bold"),
+                command=lambda c=clave: self._elegir(c),
+            ).pack(padx=20, pady=5)
+
+    def _elegir(self, broker: str):
+        self.destroy()
+        DialogoImportarBroker(
+            self.master,
+            gestor=self._gestor,
+            al_importar=self._al_importar,
+            broker=broker,
+        )
+
+
+class DialogoImportarBroker(ctk.CTkToplevel):
+    """Modal interactivo para importar posiciones abiertas desde el broker
+    elegido (eToro .xlsx/.csv, Binance, Interactive Brokers o la plantilla
+    CSV genérica de Trii/Hapi)."""
 
     def __init__(
         self,
         master,
         gestor: GestorFinanciero,
         al_importar: Callable[[], None],
+        broker: str = "etoro",
         **kwargs,
     ):
         super().__init__(master, **kwargs)
         self._gestor = gestor
         self._al_importar = al_importar
+        self._broker = broker if broker in BROKERS else "etoro"
+        self._config = BROKERS[self._broker]
         self._ruta_seleccionada: Optional[str] = None
         self._posiciones_detectadas: List[Dict[str, object]] = []
 
-        self.title("Importar portafolio desde eToro (.xlsx / .csv)")
-        self.geometry("680x640")
+        self.title(
+            f"Importar portafolio desde {self._config['nombre']} (.xlsx / .csv)")
+        self.geometry("680x680")
         self.resizable(False, True)
         self.configure(fg_color=COLORES["fondo_lateral"])
         self.transient(master)
@@ -502,27 +567,20 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             cuerpo,
-            text="📥 Importar portafolio desde eToro",
+            text=f"📥 Importar portafolio desde {self._config['nombre']}",
             font=(FUENTE, 20, "bold"),
             text_color=COLORES["texto"],
         ).pack(anchor="w")
 
-        # Tarjeta de instrucciones paso a paso para exportar desde eToro
+        # Tarjeta de instrucciones paso a paso para exportar desde el broker
         marco_guia = ctk.CTkFrame(
             cuerpo, fg_color=COLORES["fondo_tarjeta"], corner_radius=12
         )
         marco_guia.pack(fill="x", pady=(8, 12))
 
-        texto_guia = (
-            "¿Cómo exportar tus inversiones desde eToro en 30 segundos?\n"
-            "1. Entra a eToro (Web o App) → ve a 'Portafolio' (Portfolio) → haz clic en 'Historial' (History).\n"
-            "2. Arriba a la derecha, abre el menú (⚙️) y elige 'Estado de cuenta' (Account Statement).\n"
-            "3. Elige la fecha de inicio desde que empezaste a invertir hasta hoy, pulsa 'Crear' y haz clic en el icono de Excel (.xlsx).\n"
-            "4. Súbelo aquí: NexSaldo filtra automáticamente tus posiciones abiertas actuales y consolida tus compras por ticker."
-        )
         ctk.CTkLabel(
             marco_guia,
-            text=texto_guia,
+            text=str(self._config["instrucciones"]),
             font=(FUENTE, 11),
             text_color=COLORES["texto_secundario"],
             justify="left",
@@ -533,9 +591,15 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
         fila_arch = ctk.CTkFrame(cuerpo, fg_color="transparent")
         fila_arch.pack(fill="x", pady=(0, 8))
 
+        extensiones = self._config["extensiones"]
+        tipos_archivo = [
+            (f"Archivos de {self._config['nombre']} / CSV", " ".join(extensiones)),
+            ("Todos los archivos", "*.*"),
+        ]
+
         ctk.CTkButton(
             fila_arch,
-            text="📂 Seleccionar Excel (.xlsx) o CSV de eToro",
+            text=f"📂 Seleccionar archivo de {self._config['nombre']}",
             width=285,
             height=38,
             corner_radius=8,
@@ -559,8 +623,9 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
             command=self._descargar_plantilla,
         ).pack(side="left")
 
+        # Opción 1: reemplazar todo el portafolio con el archivo nuevo.
         self._var_reemplazar = ctk.BooleanVar(value=True)
-        chk_reemp = ctk.CTkCheckBox(
+        self._chk_reemplazar = ctk.CTkCheckBox(
             cuerpo,
             text="Reemplazar portafolio actual (borra importaciones previas antes de cargar solo las abiertas)",
             variable=self._var_reemplazar,
@@ -568,9 +633,25 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
             text_color=COLORES["acento"],
             fg_color=COLORES["acento"],
             hover_color=COLORES["acento_hover"],
+            command=self._al_cambiar_reemplazo,
         )
-        chk_reemp.pack(anchor="w", pady=(2, 4))
+        self._chk_reemplazar.pack(anchor="w", pady=(2, 4))
 
+        # Opción 2 (nueva): importar solo las posiciones que no existan aún.
+        self._var_sin_duplicados = ctk.BooleanVar(value=False)
+        self._chk_sin_duplicados = ctk.CTkCheckBox(
+            cuerpo,
+            text="Importar solo nuevas (omitir duplicados: compara símbolo, fecha y monto contra lo ya guardado)",
+            variable=self._var_sin_duplicados,
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["acento"],
+            fg_color=COLORES["acento"],
+            hover_color=COLORES["acento_hover"],
+            command=self._al_cambiar_sin_duplicados,
+        )
+        self._chk_sin_duplicados.pack(anchor="w", pady=(2, 4))
+
+        # Opción 3: consolidar compras del mismo ticker en una sola posición.
         self._var_agrupar = ctk.BooleanVar(value=False)
         chk = ctk.CTkCheckBox(
             cuerpo,
@@ -629,11 +710,21 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
         )
         self._btn_confirmar.pack(side="right")
 
+    def _al_cambiar_reemplazo(self):
+        """Reemplazar e 'importar solo nuevas' son excluyentes."""
+        if self._var_reemplazar.get():
+            self._var_sin_duplicados.set(False)
+
+    def _al_cambiar_sin_duplicados(self):
+        if self._var_sin_duplicados.get():
+            self._var_reemplazar.set(False)
+
     def _seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(
-            title="Seleccionar Account Statement de eToro (.xlsx o .csv)",
+            title=f"Seleccionar archivo de {self._config['nombre']}",
             filetypes=[
-                ("Archivos de eToro (Excel / CSV)", "*.xlsx *.csv *.tsv *.txt"),
+                (f"Archivos de {self._config['nombre']} / CSV",
+                 " ".join(self._config["extensiones"])),
                 ("Excel (.xlsx)", "*.xlsx"),
                 ("CSV (.csv)", "*.csv"),
                 ("Todos los archivos", "*.*"),
@@ -652,8 +743,9 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
             hijo.destroy()
 
         try:
-            posiciones = self._gestor.previsualizar_importacion_etoro(
+            posiciones = self._gestor.previsualizar_importacion_broker(
                 self._ruta_seleccionada,
+                broker=self._broker,
                 agrupar_por_ticker=bool(self._var_agrupar.get()),
             )
         except Exception as error:
@@ -668,7 +760,8 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
         self._posiciones_detectadas = posiciones
         if not posiciones:
             self._etiqueta_estado.configure(
-                text="⚠️ No se encontraron posiciones abiertas en este archivo. Verifica que sea un Estado de Cuenta (.xlsx) de eToro o CSV con columnas Symbol y Amount.",
+                text="⚠️ No se encontraron posiciones abiertas en este archivo. Verifica que sea una exportación "
+                     f"de {self._config['nombre']} con las columnas esperadas (o usa la plantilla CSV).",
                 text_color=COLORES["error"],
             )
             self._btn_confirmar.configure(state="disabled", text="✅ Importar al portafolio")
@@ -727,14 +820,14 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
         ruta = filedialog.asksaveasfilename(
             title="Guardar plantilla CSV para inversiones",
             defaultextension=".csv",
-            initialfile="plantilla_inversiones_etoro.csv",
+            initialfile="plantilla_inversiones.csv",
             filetypes=[("Archivo CSV", "*.csv")],
             parent=self,
         )
         if not ruta:
             return
         try:
-            self._gestor.exportar_plantilla_etoro_csv(ruta)
+            self._gestor.exportar_plantilla_csv(ruta)
             messagebox.showinfo(
                 "Plantilla guardada",
                 f"Se guardó la plantilla de ejemplo en:\n{ruta}",
@@ -749,26 +842,30 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
         self._btn_confirmar.configure(text="⏳ Importando...", state="disabled")
 
         limpiar_prev = bool(self._var_reemplazar.get())
+        omitir_dup = bool(self._var_sin_duplicados.get())
 
         def _tarea():
             try:
-                self._gestor.importar_inversiones_lote(
-                    self._posiciones_detectadas, limpiar_antes=limpiar_prev
+                importadas, omitidas = self._gestor.importar_inversiones_lote(
+                    self._posiciones_detectadas,
+                    limpiar_antes=limpiar_prev,
+                    omitir_duplicados=omitir_dup,
                 )
                 if self.winfo_exists():
-                    self.after(0, self._finalizar_exito)
+                    self.after(
+                        0,
+                        lambda: self._finalizar_exito(len(importadas), omitidas),
+                    )
             except Exception as error:
                 if self.winfo_exists():
                     self.after(
                         0,
-                        lambda: messagebox.showerror(
-                            "Error al importar", str(error), parent=self
-                        ),
+                        lambda e=error: self._finalizar_error(e),
                     )
 
         threading.Thread(target=_tarea, daemon=True).start()
 
-    def _finalizar_exito(self):
+    def _finalizar_exito(self, cantidad: int, omitidas: int):
         if not self.winfo_exists():
             return
         cb = self._al_importar
@@ -776,13 +873,26 @@ class DialogoImportarEtoro(ctk.CTkToplevel):
             self.grab_release()
         except Exception:
             pass
+        resumen = f"Se importaron {cantidad} posiciones al portafolio."
+        if omitidas:
+            resumen += f"\nSe omitieron {omitidas} duplicados (ya existían)."
         self.destroy()
         cb()
+        if omitidas:
+            messagebox.showinfo("Importación terminada", resumen)
+
+    def _finalizar_error(self, error: Exception):
+        """Restaura el botón y muestra el error sin cerrar el diálogo."""
+        if not self.winfo_exists():
+            return
+        self._btn_confirmar.configure(
+            state="normal", text="✅ Importar al portafolio")
+        messagebox.showerror("Error al importar", str(error), parent=self)
 
 
 class VistaInversiones(ctk.CTkFrame):
     """Módulo completo de Inversiones Bursátiles con buscador de tickers en vivo (sin lag de teclado),
-    gráfica de rendimiento estilo montaña (eToro / Robinhood) con marcos 1D, 1W, 1M, 1Y,
+    gráfica de rendimiento estilo montaña (formato eToro) con marcos 1D, 1W, 1M, 1Y,
     y portafolio dinámico en tiempo real."""
 
     def __init__(self, master, gestor: GestorFinanciero, **kwargs):
@@ -841,7 +951,7 @@ class VistaInversiones(ctk.CTkFrame):
 
         ctk.CTkButton(
             fila_sup,
-            text="📥 Importar desde eToro (.xlsx / .csv)",
+            text="📥 Importar",
             width=245,
             height=38,
             corner_radius=10,
@@ -851,7 +961,7 @@ class VistaInversiones(ctk.CTkFrame):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 13, "bold"),
-            command=self._abrir_dialogo_importar_etoro,
+            command=self._abrir_dialogo_importar,
         ).pack(side="right", padx=(0, 10))
 
         # ==================================================================
@@ -956,7 +1066,7 @@ class VistaInversiones(ctk.CTkFrame):
         self._actualizar_botones_sugerencia(self._gestor.buscar_activos_bursatiles(""))
 
         # ==================================================================
-        # 4. TARJETA CENTRAL: GRÁFICA DE RENDIMIENTO ESTILO MONTAÑA (eToro / Robinhood)
+        # 4. TARJETA CENTRAL: GRÁFICA DE RENDIMIENTO ESTILO MONTAÑA (formato eToro)
         # ==================================================================
         tarjeta_montana = ctk.CTkFrame(
             contenedor, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
@@ -1160,8 +1270,9 @@ class VistaInversiones(ctk.CTkFrame):
         if resultados:
             self._abrir_modal_asignar(resultados[0])
 
-    def _abrir_dialogo_importar_etoro(self):
-        DialogoImportarEtoro(
+    def _abrir_dialogo_importar(self):
+        """Abre el menú para elegir la plataforma de importación."""
+        DialogoElegirBroker(
             self,
             gestor=self._gestor,
             al_importar=self.refrescar,
@@ -1397,7 +1508,7 @@ class VistaInversiones(ctk.CTkFrame):
         threading.Thread(target=_tarea, daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Gráfica Estilo Montaña (eToro / Robinhood) con Área Degradada
+    # Gráfica Estilo Montaña (formato eToro) con Área Degradada
     # ------------------------------------------------------------------
     def _cargar_curva_montana_asincrona(
         self, resumen_precalculado: Optional[Dict[str, object]] = None

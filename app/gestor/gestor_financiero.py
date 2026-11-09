@@ -34,6 +34,7 @@ from app.servicio.importador_etoro import (
     generar_plantilla_csv_etoro,
     parsear_archivo_etoro_o_csv,
 )
+from app.servicio.importadores import parsear_archivo_broker
 from app.servicio.servicio_bursatil import (
     ErrorConsultaBursatil,
     ErrorSinConexionInternet,
@@ -181,6 +182,36 @@ CATEGORIAS_INGRESO_PREDETERMINADAS = (
 
 class ErrorValidacion(Exception):
     """Se lanza cuando los datos ingresados por el usuario no cumplen las reglas."""
+
+
+# ---------------------------------------------------------------------------
+# Detección de duplicados en la importación de portafolios
+# ---------------------------------------------------------------------------
+
+def _clave_duplicado(simbolo: str, fecha_compra, monto_invertido) -> tuple:
+    """Llave de comparación: símbolo + fecha de compra + monto en centavos.
+
+    El monto se compara en centavos (2 decimales) para que diferencias
+    de redondeo del archivo no cuenten como posiciones distintas.
+    """
+    monto = Decimal(str(monto_invertido)).quantize(Decimal("0.01"))
+    return (str(simbolo).strip().upper(), str(fecha_compra), monto)
+
+
+def clave_duplicado_posicion(posicion: Dict[str, object]) -> tuple:
+    """Llave de duplicado para una posición detectada en un archivo."""
+    fecha = posicion.get("fecha_compra") or ""
+    return _clave_duplicado(
+        posicion.get("simbolo", ""),
+        fecha.isoformat() if hasattr(fecha, "isoformat") else fecha,
+        posicion.get("monto_invertido", 0),
+    )
+
+
+def clave_duplicado_inversion(inversion: Inversion) -> tuple:
+    """Llave de duplicado para una inversión ya guardada en la base."""
+    return _clave_duplicado(
+        inversion.simbolo, inversion.fecha_compra, inversion.monto_invertido)
 
 
 def totales_por_moneda(movimientos: Iterable[MovimientoFinanciero]) -> Dict[str, Decimal]:
@@ -1626,18 +1657,58 @@ class GestorFinanciero:
         y devuelve ÚNICAMENTE las posiciones abiertas (por defecto cada transacción por separado)."""
         return parsear_archivo_etoro_o_csv(ruta_archivo, agrupar_por_ticker=agrupar_por_ticker)
 
+    def previsualizar_importacion_broker(
+        self, ruta_archivo: str, broker: str, agrupar_por_ticker: bool = False
+    ) -> List[Dict[str, object]]:
+        """Analiza un archivo de exportación del broker indicado (eToro, Binance,
+        Interactive Brokers, Trii o Hapi) y devuelve las posiciones a importar."""
+        return parsear_archivo_broker(
+            ruta_archivo, broker, agrupar_por_ticker=agrupar_por_ticker)
+
     def importar_inversiones_lote(
         self,
         posiciones_detectadas: Sequence[Dict[str, object]],
         limpiar_antes: bool = True,
-    ) -> List[Inversion]:
-        """Guarda en la base de datos un lote de posiciones abiertas provenientes de eToro/CSV.
-        Si `limpiar_antes=True`, limpia primero las inversiones anteriores para no duplicar."""
+        omitir_duplicados: bool = False,
+    ) -> Tuple[List[Inversion], int]:
+        """Guarda en la base de datos un lote de posiciones abiertas provenientes de un broker.
+
+        - Si `limpiar_antes=True`, limpia primero las inversiones anteriores
+          para no duplicar.
+        - Si `omitir_duplicados=True` (y no se limpia antes), compara cada
+          posición contra las inversiones ya guardadas y también contra las
+          demás filas del mismo archivo, y omite las que ya existan.
+          Una posición se considera duplicada cuando coincide el símbolo,
+          la fecha de compra y el monto invertido (en centavos).
+        Devuelve (lista de importadas, cantidad de duplicadas omitidas).
+        """
+        omitidas = 0
+        posiciones_finales = list(posiciones_detectadas)
+        if omitir_duplicados and not limpiar_antes:
+            existentes = self.obtener_inversiones(forzar_bd=True)
+            claves_existentes = {
+                clave_duplicado_inversion(inv) for inv in existentes
+            }
+            vistos_en_lote: set = set()
+            sin_duplicados: List[Dict[str, object]] = []
+            for posicion in posiciones_finales:
+                clave = clave_duplicado_posicion(posicion)
+                if clave in claves_existentes or clave in vistos_en_lote:
+                    omitidas += 1
+                    continue
+                vistos_en_lote.add(clave)
+                sin_duplicados.append(posicion)
+            posiciones_finales = sin_duplicados
+        elif omitir_duplicados and limpiar_antes:
+            # Reemplazar y omitir duplicados a la vez no tiene efecto
+            # (se borra todo antes), pero se respeta el conteo en cero.
+            omitidas = 0
+
         if limpiar_antes:
             self.limpiar_todas_las_inversiones()
 
         importadas: List[Inversion] = []
-        for item in posiciones_detectadas:
+        for item in posiciones_finales:
             simbolo_bruto = str(item.get("simbolo", "")).strip().upper()
             simbolo = normalizar_simbolo_yahoo(simbolo_bruto)
             nombre = str(item.get("nombre", simbolo)).strip()
@@ -1686,9 +1757,14 @@ class GestorFinanciero:
             if guardada.id is not None:
                 self._inversiones_verificadas_sesion.add(guardada.id)
             importadas.append(guardada)
-        return importadas
+        return importadas, omitidas
 
     def exportar_plantilla_etoro_csv(self, ruta_destino: str) -> None:
+        generar_plantilla_csv_etoro(ruta_destino)
+
+    def exportar_plantilla_csv(self, ruta_destino: str) -> None:
+        """Plantilla CSV genérica para armar un portafolio a mano
+        (usada por Trii y Hapi, que no tienen exportación pública)."""
         generar_plantilla_csv_etoro(ruta_destino)
 
     def _actualizar_inversion_saneada(self, inv_actualizada: Inversion) -> None:
@@ -1951,7 +2027,7 @@ class GestorFinanciero:
         permitir_red: bool = True,
     ) -> Dict[str, object]:
         """Construye la serie histórica `(etiqueta, valor)` para renderizar el gráfico estilo
-        montaña (eToro / Robinhood) en los marcos `1D`, `1W`, `1M`, `1Y`."""
+        montaña (formato eToro) en los marcos `1D`, `1W`, `1M`, `1Y`."""
         mon_dest = self._validar_moneda(moneda_objetivo)
         valoracion = (
             valoracion_precalculada
