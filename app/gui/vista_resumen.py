@@ -1,15 +1,16 @@
 """Vista de Resumen Financiero con gráfica combinada de Ingresos (+), Gastos (-) y Balance Neto
 con eje positivo/negativo (representación invertida bajo cero cuando los gastos superan a los ingresos),
-respetando los colores establecidos de cada categoría, selector de periodo estilo Shopify y filtro mundial de divisas."""
+respetando los colores establecidos de cada categoría, selector de periodo estilo píldora de fechas y filtro mundial de divisas."""
 
 from datetime import date
+import threading
 from decimal import Decimal
 import tkinter as tk
 from typing import Dict, Optional, Tuple
 import customtkinter as ctk
 
-from app.gui.dialogo_periodo_shopify import (
-    DialogoPeriodoShopify,
+from app.gui.dialogo_periodo import (
+    DialogoPeriodo,
     calcular_rango_preset,
     desplazar_rango,
 )
@@ -48,6 +49,7 @@ class VistaResumen(ctk.CTkFrame):
         )
         self._moneda_actual = "COP"
         self._incluir_todas_convertidas = False
+        self._actualizando_inv_bg = False
 
         self._construir_encabezado()
         self._construir_columnas()
@@ -95,7 +97,7 @@ class VistaResumen(ctk.CTkFrame):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 13, "bold"),
-            command=self._abrir_selector_periodo_shopify,
+            command=self._abrir_selector_periodo,
         )
         self._boton_periodo.pack(side="left", padx=6)
 
@@ -242,18 +244,18 @@ class VistaResumen(ctk.CTkFrame):
         )
 
     # ------------------------------------------------------------------
-    # Navegación de Periodo y Popup estilo Shopify
+    # Navegación de Periodo y Popup estilo píldora de fechas
     # ------------------------------------------------------------------
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
             fecha_inicio=self._fecha_inicio,
             fecha_fin=self._fecha_fin,
             preset_inicial=self._preset_periodo,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
         self._fecha_inicio = fecha_ini
@@ -798,13 +800,73 @@ class VistaResumen(ctk.CTkFrame):
             moneda_objetivo=moneda,
             incluir_todas_convertidas=incluir_todas,
         )
+
+        # Valoración instantánea desde memoria/caché (0ms en hilo principal) + actualización asíncrona
+        if hasattr(self._gestor, "valorar_portafolio"):
+            try:
+                datos_inv = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=True,
+                    forzar_actualizacion=False,
+                    permitir_red=False,
+                )
+            except TypeError:
+                datos_inv = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=True,
+                    forzar_actualizacion=False,
+                )
+        else:
+            datos_inv = {
+                "posiciones": [],
+                "valor_actual_mercado": Decimal("0"),
+                "ganancia_perdida_neta": Decimal("0"),
+                "rendimiento_porcentaje": Decimal("0"),
+                "en_ganancia": True,
+            }
+
+        if datos_inv.get("faltan_precios_vivos") and not self._actualizando_inv_bg:
+            self._actualizando_inv_bg = True
+
+            def _cargar_inv_vivo_bg():
+                try:
+                    self._gestor.valorar_portafolio(
+                        moneda_objetivo=moneda,
+                        incluir_todas_convertidas=True,
+                        forzar_actualizacion=False,
+                        permitir_red=True,
+                    )
+                    if self.winfo_exists():
+                        self.after(
+                            0,
+                            lambda: self._actualizar_panel_cuentas(
+                                self._moneda_actual, self._incluir_todas_convertidas
+                            ),
+                        )
+                except Exception:
+                    pass
+                finally:
+                    self._actualizando_inv_bg = False
+
+            threading.Thread(target=_cargar_inv_vivo_bg, daemon=True).start()
+        valor_inversiones: Decimal = datos_inv.get("valor_actual_mercado", Decimal("0"))
+        ganancia_inv: Decimal = datos_inv.get("ganancia_perdida_neta", Decimal("0"))
+        rend_inv_pct: Decimal = datos_inv.get("rendimiento_porcentaje", Decimal("0"))
+        en_ganancia_inv: bool = bool(datos_inv.get("en_ganancia", True))
+        posiciones_inv = datos_inv.get("posiciones", [])
+
+        patrimonio_total = total_cuentas + valor_inversiones
         self._etiqueta_saldo_cuentas_resumen.configure(
-            text=f"Saldo disponible ({moneda}): {formatear_valor(total_cuentas, moneda)}"
+            text=f"Patrimonio total ({moneda}): {formatear_valor(patrimonio_total, moneda)}"
         )
+        flecha_inv = "▲" if en_ganancia_inv else "▼"
+        signo_inv = "+" if en_ganancia_inv else "-"
         self._etiqueta_sub_cuentas.configure(
-            text="Incluyendo todas las cuentas convertidas"
-            if incluir_todas
-            else f"Mostrando solo cuentas en {moneda}"
+            text=(
+                f"Cuentas: {formatear_valor(total_cuentas, moneda)}   •   "
+                f"Inversiones: {formatear_valor(valor_inversiones, moneda)} "
+                f"({flecha_inv} {signo_inv}{abs(rend_inv_pct):.2f}%)"
+            )
         )
 
         cuentas_mostrar = [
@@ -812,47 +874,97 @@ class VistaResumen(ctk.CTkFrame):
             for c, s in cuentas_con_saldo
             if incluir_todas or c.moneda == moneda
         ]
+
+        # 1. Sección de Cuentas Bancarias / Efectivo
+        ctk.CTkLabel(
+            self._contenedor_cuentas_resumen,
+            text="🏦 Cuentas líquidas",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["texto_secundario"],
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+
         if not cuentas_mostrar:
             ctk.CTkLabel(
                 self._contenedor_cuentas_resumen,
-                text=f"No hay cuentas en {moneda}.",
-                font=(FUENTE, 12),
+                text=f"No hay cuentas registradas en {moneda}.",
+                font=(FUENTE, 11),
                 text_color=COLORES["texto_secundario"],
-            ).pack(pady=30)
-            return
+            ).pack(anchor="w", padx=12, pady=(0, 6))
+        else:
+            for cuenta, saldo in cuentas_mostrar:
+                fila = ctk.CTkFrame(
+                    self._contenedor_cuentas_resumen,
+                    fg_color=COLORES["fondo_tarjeta"],
+                    corner_radius=8,
+                )
+                fila.pack(fill="x", padx=6, pady=3)
 
-        for cuenta, saldo in cuentas_mostrar:
-            fila = ctk.CTkFrame(
-                self._contenedor_cuentas_resumen,
-                fg_color=COLORES["fondo_tarjeta"],
-                corner_radius=8,
-            )
-            fila.pack(fill="x", padx=6, pady=4)
+                ctk.CTkLabel(
+                    fila,
+                    text=f"{cuenta.nombre} ({cuenta.moneda})",
+                    font=(FUENTE, 12, "bold"),
+                    text_color=COLORES["texto"],
+                ).pack(side="left", padx=10, pady=7)
 
-            ctk.CTkLabel(
-                fila,
-                text=f"{cuenta.nombre} ({cuenta.moneda})",
-                font=(FUENTE, 12, "bold"),
-                text_color=COLORES["texto"],
-            ).pack(side="left", padx=10, pady=8)
-
-            if incluir_todas and cuenta.moneda != moneda:
-                try:
-                    conv = self._gestor.convertir_entre_monedas(
-                        saldo, cuenta.moneda, moneda
-                    )
-                    texto_saldo = f"{formatear_valor(conv, moneda)} ({formatear_valor(saldo, cuenta.moneda)})"
-                except Exception:
+                if incluir_todas and cuenta.moneda != moneda:
+                    try:
+                        conv = self._gestor.convertir_entre_monedas(
+                            saldo, cuenta.moneda, moneda
+                        )
+                        texto_saldo = f"{formatear_valor(conv, moneda)} ({formatear_valor(saldo, cuenta.moneda)})"
+                    except Exception:
+                        texto_saldo = formatear_valor(saldo, cuenta.moneda)
+                else:
                     texto_saldo = formatear_valor(saldo, cuenta.moneda)
-            else:
-                texto_saldo = formatear_valor(saldo, cuenta.moneda)
 
+                ctk.CTkLabel(
+                    fila,
+                    text=texto_saldo,
+                    font=(FUENTE, 12, "bold"),
+                    text_color=COLORES["acento"],
+                ).pack(side="right", padx=10, pady=7)
+
+        # 2. Sección de Portafolio de Inversiones en Tiempo Real
+        ctk.CTkLabel(
+            self._contenedor_cuentas_resumen,
+            text="📈 Portafolio de inversiones (Yahoo Finance)",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["texto_secundario"],
+        ).pack(anchor="w", padx=8, pady=(10, 2))
+
+        if not posiciones_inv:
             ctk.CTkLabel(
-                fila,
-                text=texto_saldo,
-                font=(FUENTE, 12, "bold"),
-                text_color=COLORES["acento"],
-            ).pack(side="right", padx=10, pady=8)
+                self._contenedor_cuentas_resumen,
+                text="Sin inversiones activas. Añade ETFs o acciones en la pestaña Inversiones.",
+                font=(FUENTE, 11),
+                text_color=COLORES["texto_secundario"],
+            ).pack(anchor="w", padx=12, pady=(0, 6))
+        else:
+            for pos in posiciones_inv:
+                inv = pos.inversion
+                fila_i = ctk.CTkFrame(
+                    self._contenedor_cuentas_resumen,
+                    fg_color=COLORES["fondo_tarjeta"],
+                    corner_radius=8,
+                )
+                fila_i.pack(fill="x", padx=6, pady=3)
+
+                ctk.CTkLabel(
+                    fila_i,
+                    text=f"{inv.simbolo} · {inv.nombre[:20]}",
+                    font=(FUENTE, 12, "bold"),
+                    text_color=COLORES["texto"],
+                ).pack(side="left", padx=10, pady=7)
+
+                fl = "▲" if pos.en_ganancia else "▼"
+                sg = "+" if pos.en_ganancia else "-"
+                col_p = COLORES["exito"] if pos.en_ganancia else COLORES["error"]
+                ctk.CTkLabel(
+                    fila_i,
+                    text=f"{formatear_valor(pos.valor_actual_convertido, moneda)} ({fl} {sg}{abs(pos.rendimiento_porcentaje):.2f}%)",
+                    font=(FUENTE, 11, "bold"),
+                    text_color=col_p,
+                ).pack(side="right", padx=10, pady=7)
 
 
 def _abreviar_monto(valor: Decimal) -> str:

@@ -1,4 +1,4 @@
-"""Selector de periodo tipo Shopify para NexSaldo.
+"""Selector de periodo tipo píldora de fechas para NexSaldo.
 
 Al hacer clic en la etiqueta de fecha de Resumen Financiero (ej. 'Noviembre de 2026'),
 se abre esta ventana con:
@@ -17,7 +17,7 @@ import customtkinter as ctk
 from app.gui.estilos import COLORES, FUENTE
 from app.gui.formato import NOMBRES_DIAS, NOMBRES_MESES, nombre_mes
 
-PRESETS_SHOPIFY = [
+PRESETS_PERIODO = [
     ("HOY", "Hoy (Día)"),
     ("AYER", "Ayer"),
     ("ESTA_SEMANA", "Esta semana"),
@@ -34,7 +34,7 @@ PRESETS_SHOPIFY = [
 
 
 def calcular_rango_preset(clave_preset: str, referencia: Optional[date] = None) -> Tuple[date, date, str]:
-    """Devuelve (fecha_inicio, fecha_fin, etiqueta_legible) para cada preset tipo Shopify."""
+    """Devuelve (fecha_inicio, fecha_fin, etiqueta_legible) para cada preset tipo píldora de fechas."""
     hoy = referencia or date.today()
 
     if clave_preset == "HOY":
@@ -174,8 +174,8 @@ def desplazar_rango(
     )
 
 
-class DialogoPeriodoShopify(ctk.CTkToplevel):
-    """Pop-up estilo Shopify: barra lateral izquierda con rangos rápidos (Día, Semana,
+class DialogoPeriodo(ctk.CTkToplevel):
+    """Pop-up estilo píldora de fechas: barra lateral izquierda con rangos rápidos (Día, Semana,
     Mes, Trimestre/Quarter, Año, YTD, Personalizado) y calendario interactivo a la derecha."""
 
     def __init__(
@@ -218,7 +218,7 @@ class DialogoPeriodoShopify(ctk.CTkToplevel):
         contenedor.grid_rowconfigure(0, weight=1)
 
         # ==================================================================
-        # COLUMNA IZQUIERDA: Presets estilo Shopify
+        # COLUMNA IZQUIERDA: Presets estilo píldora de fechas
         # ==================================================================
         panel_presets = ctk.CTkScrollableFrame(
             contenedor,
@@ -235,7 +235,7 @@ class DialogoPeriodoShopify(ctk.CTkToplevel):
             text_color=COLORES["acento"],
         ).pack(anchor="w", padx=10, pady=(6, 6))
 
-        for clave, texto in PRESETS_SHOPIFY:
+        for clave, texto in PRESETS_PERIODO:
             btn = ctk.CTkButton(
                 panel_presets,
                 text=texto,

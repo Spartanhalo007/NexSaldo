@@ -1,6 +1,8 @@
-"""Ventana principal de NexSaldo con barra lateral de navegación."""
+"""Ventana principal de NexSaldo con barra lateral de navegación y caché de vistas (sin reconstruir la app al cambiar de sección)."""
 
 from pathlib import Path
+import threading
+from typing import Dict, Optional
 import customtkinter as ctk
 from PIL import Image
 
@@ -11,6 +13,7 @@ from app.gui.adaptadores_moneda import (
 from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
 from app.gui.vista_gastos import VistaGastos
 from app.gui.vista_ingresos import VistaIngresos
+from app.gui.vista_inversiones import VistaInversiones
 from app.gui.vista_resumen import VistaResumen
 
 RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
@@ -20,7 +23,7 @@ NAVEGACION = [
     ("Cuentas", "cuentas"),
     ("Gastos", "gastos"),
     ("Ingresos", "ingresos"),
-    ("Inversiones", "pendiente"),
+    ("Inversiones", "inversiones"),
     ("Reportes", "pendiente"),
     ("Categorías", "pendiente"),
     ("Configuración", "pendiente"),
@@ -28,7 +31,6 @@ NAVEGACION = [
 ]
 
 MODULOS_PENDIENTES = {
-    "Inversiones": "Seguimiento de inversiones en desarrollo.",
     "Reportes": "Análisis y gráficos detallados en desarrollo.",
     "Categorías": "Gestión de categorías personalizadas en desarrollo.",
     "Configuración": "Ajustes y exportación de datos en desarrollo.",
@@ -38,7 +40,7 @@ ANCHO_BARRA = 200
 
 
 class VentanaPrincipal(ctk.CTk):
-    """Ventana raíz con barra de navegación lateral y área de trabajo dinámica."""
+    """Ventana raíz con barra de navegación lateral y caché de vistas para transición instantánea."""
 
     def __init__(self, gestor):
         super().__init__()
@@ -51,13 +53,29 @@ class VentanaPrincipal(ctk.CTk):
         self.configure(fg_color=COLORES["fondo_contenido"])
 
         self._gestor = gestor
-        self._vista_actual = None
+        self._vista_actual: Optional[ctk.CTkFrame] = None
+        self._clave_vista_actual: Optional[str] = None
+        self._vistas_cache: Dict[str, ctk.CTkFrame] = {}
         self._botones = {}
         self._logo_img = self._cargar_logo()
 
         self._construir_barra_lateral()
         self._construir_area_contenido()
         self._al_navegar("resumen", "Resumen")
+
+        # Precalentar en segundo plano las tasas principales (USD->COP, EUR->COP) para que
+        # al cambiar de moneda en Gastos/Ingresos/Inversiones la conversión sea instantánea (0ms)
+        self.after(120, self._precalentar_tasas_principales)
+
+    def _precalentar_tasas_principales(self):
+        def _tarea():
+            try:
+                if hasattr(self._gestor, "obtener_tasa_cambio"):
+                    self._gestor.obtener_tasa_cambio("USD", "COP", forzar_actualizacion=False)
+            except Exception:
+                pass
+
+        threading.Thread(target=_tarea, daemon=True).start()
 
     def _cargar_logo(self):
         try:
@@ -135,10 +153,39 @@ class VentanaPrincipal(ctk.CTk):
         self._area = ctk.CTkFrame(self, fg_color="transparent")
         self._area.pack(side="left", fill="both", expand=True, padx=18, pady=16)
 
-    def _limpiar_area(self):
+    def _ocultar_vista_actual(self):
         if self._vista_actual is not None:
-            self._vista_actual.destroy()
+            try:
+                self._vista_actual.pack_forget()
+            except Exception:
+                pass
             self._vista_actual = None
+
+    def _activar_vista_cacheada(self, clave: str, fabrica):
+        """Muestra una vista reutilizando su instancia en caché en lugar de destruir y recrear widgets."""
+        if self._clave_vista_actual == clave and self._vista_actual is not None:
+            self._refrescar_instancia_vista(self._vista_actual)
+            return
+
+        self._ocultar_vista_actual()
+        ya_existia = clave in self._vistas_cache
+        if not ya_existia:
+            self._vistas_cache[clave] = fabrica()
+
+        vista = self._vistas_cache[clave]
+        vista.pack(fill="both", expand=True)
+        self._vista_actual = vista
+        self._clave_vista_actual = clave
+
+        if ya_existia:
+            self._refrescar_instancia_vista(vista)
+
+    @staticmethod
+    def _refrescar_instancia_vista(vista):
+        if hasattr(vista, "refrescar"):
+            vista.refrescar()
+        elif hasattr(vista, "_refrescar_vista"):
+            vista._refrescar_vista()
 
     def _al_navegar(self, modulo, texto):
         if modulo == "resumen":
@@ -149,6 +196,8 @@ class VentanaPrincipal(ctk.CTk):
             self._mostrar_gastos()
         elif modulo == "ingresos":
             self._mostrar_ingresos()
+        elif modulo == "inversiones":
+            self._mostrar_inversiones()
         elif modulo == "movimientos":
             filtro = "GASTO" if texto == "Gastos" else "INGRESO"
             self._mostrar_movimientos(filtro_tipo=filtro, titulo=texto)
@@ -162,48 +211,58 @@ class VentanaPrincipal(ctk.CTk):
         self._resaltar_boton(texto)
 
     def _mostrar_resumen(self):
-        self._limpiar_area()
-        self._vista_actual = VistaResumen(self._area, self._gestor)
-        self._vista_actual.pack(fill="both", expand=True)
+        self._activar_vista_cacheada(
+            "resumen", lambda: VistaResumen(self._area, self._gestor)
+        )
 
     def _mostrar_cuentas(self):
-        self._limpiar_area()
-        self._vista_actual = VistaCuentasConDivisa(self._area, self._gestor)
-        self._vista_actual.pack(fill="both", expand=True)
+        self._activar_vista_cacheada(
+            "cuentas", lambda: VistaCuentasConDivisa(self._area, self._gestor)
+        )
 
     def _mostrar_gastos(self):
-        self._limpiar_area()
-        self._vista_actual = VistaGastos(self._area, self._gestor)
-        self._vista_actual.pack(fill="both", expand=True)
+        self._activar_vista_cacheada(
+            "gastos", lambda: VistaGastos(self._area, self._gestor)
+        )
 
     def _mostrar_ingresos(self):
-        self._limpiar_area()
-        self._vista_actual = VistaIngresos(self._area, self._gestor)
-        self._vista_actual.pack(fill="both", expand=True)
+        self._activar_vista_cacheada(
+            "ingresos", lambda: VistaIngresos(self._area, self._gestor)
+        )
+
+    def _mostrar_inversiones(self):
+        self._activar_vista_cacheada(
+            "inversiones", lambda: VistaInversiones(self._area, self._gestor)
+        )
 
     def _mostrar_movimientos(self, filtro_tipo, titulo):
-        self._limpiar_area()
-        self._vista_actual = VistaMovimientosConDivisa(
-            self._area, self._gestor, filtro_tipo=filtro_tipo, titulo=titulo
+        clave = f"movimientos_{filtro_tipo}"
+        self._activar_vista_cacheada(
+            clave,
+            lambda: VistaMovimientosConDivisa(
+                self._area, self._gestor, filtro_tipo=filtro_tipo, titulo=titulo
+            ),
         )
-        self._vista_actual.pack(fill="both", expand=True)
 
     def _mostrar_pendiente(self, titulo, mensaje):
-        self._limpiar_area()
-        marco = ctk.CTkFrame(
-            self._area, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
-        )
-        marco.pack(fill="both", expand=True)
-        ctk.CTkLabel(
-            marco,
-            text=titulo,
-            font=(FUENTE, 24, "bold"),
-            text_color=COLORES["texto"],
-        ).pack(pady=(80, 10))
-        ctk.CTkLabel(
-            marco,
-            text=mensaje,
-            font=(FUENTE, 14),
-            text_color=COLORES["texto_secundario"],
-        ).pack()
-        self._vista_actual = marco
+        clave = f"pendiente_{titulo}"
+
+        def _crear():
+            marco = ctk.CTkFrame(
+                self._area, fg_color=COLORES["fondo_tarjeta"], corner_radius=14
+            )
+            ctk.CTkLabel(
+                marco,
+                text=titulo,
+                font=(FUENTE, 24, "bold"),
+                text_color=COLORES["texto"],
+            ).pack(pady=(80, 10))
+            ctk.CTkLabel(
+                marco,
+                text=mensaje,
+                font=(FUENTE, 14),
+                text_color=COLORES["texto_secundario"],
+            ).pack()
+            return marco
+
+        self._activar_vista_cacheada(clave, _crear)

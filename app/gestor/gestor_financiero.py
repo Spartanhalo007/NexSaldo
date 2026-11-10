@@ -9,7 +9,8 @@ Incluye gestión inteligente de estado de conexión a internet para divisas e in
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import threading
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from app.modelo.categoria import Categoria
 from app.modelo.cotizacion import Cotizacion
@@ -20,8 +21,20 @@ from app.modelo.divisas import (
     construir_lista_selector_divisas,
 )
 from app.modelo.etiqueta import Etiqueta
+from app.modelo.inversion import (
+    CATALOGO_ACTIVOS_BURSATILES,
+    MAPA_CRIPTO_A_YAHOO,
+    Inversion,
+    ValoracionInversion,
+    normalizar_simbolo_yahoo,
+)
 from app.modelo.movimiento_financiero import MovimientoFinanciero
 from app.modelo.transferencia import Transferencia
+from app.servicio.importador_etoro import (
+    generar_plantilla_csv_etoro,
+    parsear_archivo_etoro_o_csv,
+)
+from app.servicio.importadores import parsear_archivo_broker
 from app.servicio.servicio_bursatil import (
     ErrorConsultaBursatil,
     ErrorSinConexionInternet,
@@ -171,6 +184,36 @@ class ErrorValidacion(Exception):
     """Se lanza cuando los datos ingresados por el usuario no cumplen las reglas."""
 
 
+# ---------------------------------------------------------------------------
+# Detección de duplicados en la importación de portafolios
+# ---------------------------------------------------------------------------
+
+def _clave_duplicado(simbolo: str, fecha_compra, monto_invertido) -> tuple:
+    """Llave de comparación: símbolo + fecha de compra + monto en centavos.
+
+    El monto se compara en centavos (2 decimales) para que diferencias
+    de redondeo del archivo no cuenten como posiciones distintas.
+    """
+    monto = Decimal(str(monto_invertido)).quantize(Decimal("0.01"))
+    return (str(simbolo).strip().upper(), str(fecha_compra), monto)
+
+
+def clave_duplicado_posicion(posicion: Dict[str, object]) -> tuple:
+    """Llave de duplicado para una posición detectada en un archivo."""
+    fecha = posicion.get("fecha_compra") or ""
+    return _clave_duplicado(
+        posicion.get("simbolo", ""),
+        fecha.isoformat() if hasattr(fecha, "isoformat") else fecha,
+        posicion.get("monto_invertido", 0),
+    )
+
+
+def clave_duplicado_inversion(inversion: Inversion) -> tuple:
+    """Llave de duplicado para una inversión ya guardada en la base."""
+    return _clave_duplicado(
+        inversion.simbolo, inversion.fecha_compra, inversion.monto_invertido)
+
+
 def totales_por_moneda(movimientos: Iterable[MovimientoFinanciero]) -> Dict[str, Decimal]:
     """Suma valores agrupando por moneda sin mezclar divisas."""
     totales: Dict[str, Decimal] = {}
@@ -228,6 +271,13 @@ class GestorFinanciero:
             )
         }
         self._etiquetas_memoria_extra: Dict[str, Etiqueta] = {}
+        self._inversiones_memoria: List[Inversion] = []
+        self._cache_inversiones_bd: Optional[List[Inversion]] = None
+        self._cache_categorias_detalladas: Dict[str, List[Categoria]] = {}
+        self._cache_nombres_categorias: Optional[List[str]] = None
+        self._monedas_recientes_cargadas_bd: bool = False
+        self._tabla_inversion_verificada: bool = False
+        self._inversiones_verificadas_sesion: Set[int] = set()
 
     # ------------------------------------------------------------------
     # Estado de conexión a internet, caché offline y notificaciones a la GUI
@@ -369,28 +419,42 @@ class GestorFinanciero:
         limpia = codigo.strip().upper()
         if limpia not in DIVISAS_MUNDIALES or limpia == "COP":
             return
+        if self._monedas_recientes_memoria and self._monedas_recientes_memoria[0] == limpia:
+            return
         if limpia in self._monedas_recientes_memoria:
             self._monedas_recientes_memoria.remove(limpia)
         self._monedas_recientes_memoria.insert(0, limpia)
         self._monedas_recientes_memoria = self._monedas_recientes_memoria[:4]
 
         if hasattr(self._repositorio, "registrar_moneda_reciente"):
-            try:
-                self._repositorio.registrar_moneda_reciente(limpia)
-            except Exception:
-                pass
+            def _guardar_bg():
+                try:
+                    self._repositorio.registrar_moneda_reciente(limpia)
+                except Exception:
+                    pass
+            threading.Thread(target=_guardar_bg, daemon=True).start()
 
     def obtener_ultimas_5_monedas(self) -> List[str]:
-        """Devuelve siempre ['COP', <hasta 4 últimas divisas usadas>]."""
-        recientes_bd: List[str] = []
-        if hasattr(self._repositorio, "obtener_monedas_recientes"):
-            try:
-                recientes_bd = self._repositorio.obtener_monedas_recientes(4)
-            except Exception:
-                recientes_bd = []
+        """Devuelve siempre ['COP', <hasta 4 últimas divisas usadas>] desde caché en memoria."""
+        if not self._monedas_recientes_cargadas_bd:
+            self._monedas_recientes_cargadas_bd = True
+            if hasattr(self._repositorio, "obtener_monedas_recientes"):
+                try:
+                    recientes_bd = self._repositorio.obtener_monedas_recientes(4)
+                    combinadas_ini: List[str] = []
+                    for cod in list(recientes_bd) + list(self._monedas_recientes_memoria):
+                        c = cod.strip().upper()
+                        if c in DIVISAS_MUNDIALES and c != "COP" and c not in combinadas_ini:
+                            combinadas_ini.append(c)
+                        if len(combinadas_ini) >= 4:
+                            break
+                    if combinadas_ini:
+                        self._monedas_recientes_memoria = combinadas_ini
+                except Exception:
+                    pass
 
         combinadas: List[str] = ["COP"]
-        for cod in list(recientes_bd) + list(self._monedas_recientes_memoria):
+        for cod in self._monedas_recientes_memoria:
             c = cod.strip().upper()
             if c in DIVISAS_MUNDIALES and c not in combinadas:
                 combinadas.append(c)
@@ -405,11 +469,35 @@ class GestorFinanciero:
     # ------------------------------------------------------------------
     # Conversión en tiempo real entre cualquier par de divisas (Yahoo Finance) + Caché Offline
     # ------------------------------------------------------------------
+    def tiene_tasa_en_sesion(self, moneda_origen: str, moneda_destino: str) -> bool:
+        """Indica si el par de divisas ya está cargado en memoria en esta sesión (respuesta 0ms)."""
+        origen = moneda_origen.strip().upper()
+        destino = moneda_destino.strip().upper()
+        if origen == destino:
+            return True
+        if (origen, destino) in self._tasas_vivas_sesion:
+            return True
+        if origen == "COP" and (destino, "COP") in self._tasas_vivas_sesion:
+            return True
+        return False
+
+    def obtener_tasa_cambio_instantanea(
+        self, moneda_origen: str, moneda_destino: str
+    ) -> Optional[Cotizacion]:
+        """Devuelve la tasa de cambio desde memoria o caché local en 0ms sin realizar llamadas de red."""
+        return self.obtener_tasa_cambio(
+            moneda_origen,
+            moneda_destino,
+            forzar_actualizacion=False,
+            permitir_red=False,
+        )
+
     def obtener_tasa_cambio(
         self,
         moneda_origen: str,
         moneda_destino: str,
         forzar_actualizacion: bool = False,
+        permitir_red: bool = True,
     ) -> Optional[Cotizacion]:
         origen = self._validar_moneda(moneda_origen)
         destino = self._validar_moneda(moneda_destino)
@@ -425,16 +513,15 @@ class GestorFinanciero:
 
         par = (origen, destino)
 
-        # Si ya se obtuvo en vivo en esta sesión y sigue habiendo conexión, reutilizar sin latencia
-        if (
-            not forzar_actualizacion
-            and par in self._tasas_vivas_sesion
-            and self.hay_conexion_internet(usar_cache_breve=True)
-        ):
+        # Si ya se obtuvo en vivo en esta sesión, reutilizar instantáneamente en 0ms
+        if not forzar_actualizacion and par in self._tasas_vivas_sesion:
             cot_viva = self._tasas_vivas_sesion[par]
             self._estado_conexion_api = ESTADO_CONEXION_ONLINE
             self._ultima_cotizacion_usada = cot_viva
             return cot_viva
+
+        if not permitir_red:
+            return self._buscar_cotizacion_en_cache(origen, destino)
 
         try:
             nueva = self._servicio_bursatil.consultar_tasa_cambio(origen, destino)
@@ -548,25 +635,61 @@ class GestorFinanciero:
             self._notificar_cambio_estado_conexion()
             return None
 
+    def consultar_precio_historico_inversion(
+        self,
+        simbolo: str,
+        fecha_compra: date,
+        moneda_esperada: str = "USD",
+    ) -> Optional[Decimal]:
+        """Obtiene el precio histórico ajustado por splits en `fecha_compra` desde Yahoo Finance."""
+        if not hasattr(self._servicio_bursatil, "consultar_precio_historico_en_fecha"):
+            return None
+        simbolo_limpio = normalizar_simbolo_yahoo(simbolo.strip().upper())
+        try:
+            precio_usd = self._servicio_bursatil.consultar_precio_historico_en_fecha(
+                simbolo_limpio, fecha_compra
+            )
+        except Exception:
+            precio_usd = None
+        if precio_usd is None or precio_usd <= Decimal("0"):
+            return None
+        mon_dest = (moneda_esperada or "USD").strip().upper()
+        if mon_dest == "USD":
+            return precio_usd
+        try:
+            return self.convertir_entre_monedas(precio_usd, "USD", mon_dest)
+        except Exception:
+            return precio_usd
+
     def consultar_precio_inversion(
         self,
         simbolo: str,
         moneda_esperada: str = "USD",
         forzar_actualizacion: bool = False,
+        permitir_red: bool = True,
     ) -> Optional[Cotizacion]:
-        """Consulta el precio en tiempo real de un activo de inversión (ej. 'VOO', 'AAPL')
-        y si no hay conexión a internet devuelve el precio guardado en caché (o None si no hay caché),
-        actualizando el estado de conexión para informar al usuario."""
-        simbolo_limpio = simbolo.strip().upper()
-        if (
-            not forzar_actualizacion
-            and simbolo_limpio in self._precios_inversion_vivos_sesion
-            and self.hay_conexion_internet(usar_cache_breve=True)
-        ):
+        """Consulta el precio en tiempo real de un activo de inversión (ej. 'VOO', 'AAPL', 'BTC-USD', 'SOL-USD').
+        Si `permitir_red=False`, devuelve inmediatamente desde memoria o caché de BD en 0ms sin bloquear la GUI."""
+        simbolo_limpio = normalizar_simbolo_yahoo(simbolo.strip().upper())
+        if not forzar_actualizacion and simbolo_limpio in self._precios_inversion_vivos_sesion:
             cot_viva = self._precios_inversion_vivos_sesion[simbolo_limpio]
             self._estado_conexion_api = ESTADO_CONEXION_ONLINE
             self._ultima_cotizacion_usada = cot_viva
             return cot_viva
+
+        if not permitir_red:
+            cot_mem = self._precios_inversion_memoria.get(simbolo_limpio)
+            if cot_mem is not None:
+                return cot_mem
+            if hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                try:
+                    cot_bd = self._repositorio.obtener_ultima_cotizacion(simbolo_limpio)
+                    if cot_bd is not None:
+                        self._precios_inversion_memoria[simbolo_limpio] = cot_bd
+                        return cot_bd
+                except Exception:
+                    pass
+            return None
 
         try:
             nueva = self._servicio_bursatil.consultar_precio_actual(
@@ -585,7 +708,7 @@ class GestorFinanciero:
             self._ultima_cotizacion_usada = nueva
             self._notificar_cambio_estado_conexion()
             return nueva
-        except (ErrorSinConexionInternet, ErrorConsultaBursatil):
+        except ErrorSinConexionInternet:
             cot_cache = self._precios_inversion_memoria.get(simbolo_limpio)
             if cot_cache is None and hasattr(self._repositorio, "obtener_ultima_cotizacion"):
                 cot_cache = self._repositorio.obtener_ultima_cotizacion(simbolo_limpio)
@@ -601,6 +724,12 @@ class GestorFinanciero:
             self._ultima_cotizacion_usada = None
             self._notificar_cambio_estado_conexion()
             return None
+        except ErrorConsultaBursatil:
+            # El usuario sí tiene internet pero el símbolo no existe o no tiene datos en Yahoo Finance
+            cot_cache = self._precios_inversion_memoria.get(simbolo_limpio)
+            if cot_cache is None and hasattr(self._repositorio, "obtener_ultima_cotizacion"):
+                cot_cache = self._repositorio.obtener_ultima_cotizacion(simbolo_limpio)
+            return cot_cache
 
     def convertir_usd_a_cop(self, monto_usd: Decimal, tasa: Optional[Decimal] = None) -> Decimal:
         tasa_efectiva = tasa
@@ -854,9 +983,17 @@ class GestorFinanciero:
     # Categorías (compatibilidad total + creación customizada para GASTO e INGRESO)
     # ------------------------------------------------------------------
     def obtener_categorias(self) -> List[str]:
-        return self._repositorio.obtener_categorias()
+        if self._cache_nombres_categorias is not None:
+            return list(self._cache_nombres_categorias)
+        nombres = self._repositorio.obtener_categorias()
+        self._cache_nombres_categorias = list(nombres)
+        return nombres
 
     def obtener_categorias_detalladas(self, tipo: Optional[str] = "GASTO") -> List[Categoria]:
+        clave_tipo = tipo.upper() if isinstance(tipo, str) else "TODOS"
+        if clave_tipo in self._cache_categorias_detalladas:
+            return list(self._cache_categorias_detalladas[clave_tipo])
+
         predeterminadas = (
             CATEGORIAS_INGRESO_PREDETERMINADAS
             if (tipo and tipo.upper() == "INGRESO")
@@ -875,6 +1012,7 @@ class GestorFinanciero:
                         except Exception:
                             categorias.append(cat_p)
             if categorias:
+                self._cache_categorias_detalladas[clave_tipo] = list(categorias)
                 return categorias
 
         nombres_repo = self._repositorio.obtener_categorias()
@@ -945,6 +1083,8 @@ class GestorFinanciero:
             guardada = nueva.con_id(len(self._categorias_memoria_extra) + 10)
             self._categorias_memoria_extra[nombre_limpio] = guardada
 
+        self._cache_categorias_detalladas.clear()
+        self._cache_nombres_categorias = None
         if hasattr(self._repositorio, "registrar_color_reciente"):
             try:
                 self._repositorio.registrar_color_reciente(color_limpio)
@@ -1258,6 +1398,761 @@ class GestorFinanciero:
 
     def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
         return self._repositorio.obtener_transferencias(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
+
+    # ------------------------------------------------------------------
+    # Módulo de Inversiones Bursátiles (Buscador, Portafolio, Valoración en Vivo y Curva de Montaña)
+    # ------------------------------------------------------------------
+    def buscar_activos_bursatiles(
+        self, consulta: str = "", incluir_remoto: bool = False
+    ) -> List[Dict[str, str]]:
+        """Busca tickers de acciones y ETFs (ej. TTWO, QQQ, VOO, SPY, AAPL, NVDA)."""
+        if hasattr(self._servicio_bursatil, "buscar_activos_bursatiles"):
+            try:
+                return self._servicio_bursatil.buscar_activos_bursatiles(
+                    consulta, incluir_remoto=incluir_remoto
+                )
+            except TypeError:
+                return self._servicio_bursatil.buscar_activos_bursatiles(consulta)
+        return list(CATALOGO_ACTIVOS_BURSATILES)
+
+    def _asegurar_tabla_inversion_bd(self) -> None:
+        if self._tabla_inversion_verificada:
+            return
+        if hasattr(self._repositorio, "_asegurar_tabla_inversion"):
+            self._repositorio._asegurar_tabla_inversion()
+            self._tabla_inversion_verificada = True
+            return
+        if hasattr(self._repositorio, "ejecutar_consulta"):
+            self._repositorio.ejecutar_consulta(
+                """
+                CREATE TABLE IF NOT EXISTS inversion (
+                    id SERIAL PRIMARY KEY,
+                    simbolo VARCHAR(20) NOT NULL,
+                    nombre VARCHAR(100) NOT NULL,
+                    monto_invertido NUMERIC(16,2) NOT NULL CHECK (monto_invertido > 0),
+                    moneda CHAR(3) NOT NULL DEFAULT 'USD',
+                    precio_compra NUMERIC(20,8) NOT NULL CHECK (precio_compra > 0),
+                    cantidad_titulos NUMERIC(20,8) NOT NULL CHECK (cantidad_titulos > 0),
+                    fecha_compra DATE NOT NULL DEFAULT CURRENT_DATE,
+                    cuenta_id INTEGER REFERENCES cuenta(id) ON DELETE SET NULL,
+                    notas VARCHAR(200),
+                    fecha_registro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+    def obtener_inversiones(self, forzar_bd: bool = False) -> List[Inversion]:
+        if not forzar_bd and self._cache_inversiones_bd is not None:
+            return list(self._cache_inversiones_bd)
+
+        if hasattr(self._repositorio, "obtener_inversiones"):
+            try:
+                lista = self._repositorio.obtener_inversiones()
+                self._cache_inversiones_bd = list(lista)
+                return list(lista)
+            except Exception:
+                pass
+        if hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._asegurar_tabla_inversion_bd()
+                filas = self._repositorio.ejecutar_consulta(
+                    """
+                    SELECT id, simbolo, nombre, monto_invertido, moneda,
+                           precio_compra, cantidad_titulos, fecha_compra, cuenta_id, notas
+                    FROM inversion
+                    ORDER BY fecha_compra DESC, id DESC
+                    """
+                )
+                lista = [
+                    Inversion(
+                        id=f[0],
+                        simbolo=f[1].strip().upper(),
+                        nombre=f[2],
+                        monto_invertido=Decimal(str(f[3])),
+                        moneda=f[4].strip().upper(),
+                        precio_compra=Decimal(str(f[5])),
+                        cantidad_titulos=Decimal(str(f[6])),
+                        fecha_compra=f[7],
+                        cuenta_id=f[8],
+                        notas=f[9],
+                    )
+                    for f in filas
+                ]
+                self._cache_inversiones_bd = list(lista)
+                return list(lista)
+            except Exception:
+                pass
+        return list(self._inversiones_memoria)
+
+    def registrar_inversion(
+        self,
+        simbolo: str,
+        nombre: str,
+        monto_texto: str,
+        moneda: str = "USD",
+        precio_compra_texto: Optional[str] = None,
+        fecha_texto: Optional[str] = None,
+        cuenta_id: Optional[int] = None,
+        notas: Optional[str] = None,
+    ) -> Inversion:
+        """Registra una inversión bursátil calculando automáticamente la fracción de títulos
+        comprados según el monto invertido y el precio de mercado (o precio de compra indicado)."""
+        if not isinstance(simbolo, str) or not simbolo.strip():
+            raise ErrorValidacion("El símbolo bursátil (ticker) es obligatorio.")
+        simbolo_bruto = simbolo.strip().upper()
+        simbolo_limpio = normalizar_simbolo_yahoo(simbolo_bruto)
+        nombre_base = (nombre or simbolo_limpio).strip()
+        if simbolo_bruto in MAPA_CRIPTO_A_YAHOO and nombre_base.upper() in (simbolo_bruto, simbolo_limpio):
+            nombre_base = MAPA_CRIPTO_A_YAHOO[simbolo_bruto][1]
+        nombre_limpio = nombre_base[:100]
+        monto_valido = self._validar_valor(monto_texto)
+        moneda_valida = self._validar_moneda(moneda)
+        self.registrar_moneda_usada(moneda_valida)
+        fecha_valida = (
+            self._validar_fecha(fecha_texto)
+            if fecha_texto and fecha_texto.strip()
+            else date.today()
+        )
+        notas_limpias = self._validar_descripcion(notas)
+
+        # Determinar el precio de compra en la moneda de la inversión
+        precio_compra: Optional[Decimal] = None
+        if precio_compra_texto and str(precio_compra_texto).strip():
+            try:
+                p_dec = Decimal(str(precio_compra_texto).strip().replace(",", "."))
+                if p_dec > Decimal("0"):
+                    precio_compra = p_dec.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+            except InvalidOperation as error:
+                raise ErrorValidacion("El precio de compra por acción/título no es válido.") from error
+
+        if precio_compra is None and fecha_valida < date.today():
+            precio_compra = self.consultar_precio_historico_inversion(
+                simbolo_limpio, fecha_valida, moneda_esperada=moneda_valida
+            )
+
+        if precio_compra is None:
+            cot_mercado = self.consultar_precio_inversion(simbolo_limpio, moneda_esperada="USD")
+            if cot_mercado is not None and cot_mercado.precio > Decimal("0"):
+                if moneda_valida == cot_mercado.moneda:
+                    precio_compra = cot_mercado.precio
+                else:
+                    try:
+                        precio_compra = self.convertir_entre_monedas(
+                            cot_mercado.precio, cot_mercado.moneda, moneda_valida
+                        )
+                    except ErrorValidacion:
+                        precio_compra = cot_mercado.precio
+            else:
+                # Si se registra completamente offline sin caché previa, usar base unitaria 100.00
+                precio_compra = Decimal("100.00000000")
+
+        if precio_compra <= Decimal("0"):
+            raise ErrorValidacion("El precio de compra debe ser mayor que cero.")
+
+        cantidad_titulos = (monto_valido / precio_compra).quantize(
+            Decimal("0.00000001"), rounding=ROUND_HALF_UP
+        )
+        if cantidad_titulos <= Decimal("0"):
+            cantidad_titulos = Decimal("0.00000001")
+
+        nueva = Inversion(
+            id=None,
+            simbolo=simbolo_limpio,
+            nombre=nombre_limpio,
+            monto_invertido=monto_valido,
+            moneda=moneda_valida,
+            precio_compra=precio_compra,
+            cantidad_titulos=cantidad_titulos,
+            fecha_compra=fecha_valida,
+            cuenta_id=cuenta_id,
+            notas=notas_limpias,
+        )
+
+        guardada_bd: Optional[Inversion] = None
+        if hasattr(self._repositorio, "insertar_inversion"):
+            try:
+                guardada_bd = self._repositorio.insertar_inversion(nueva)
+            except Exception:
+                guardada_bd = None
+        if guardada_bd is None and hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._asegurar_tabla_inversion_bd()
+                filas = self._repositorio.ejecutar_consulta(
+                    """
+                    INSERT INTO inversion (
+                        simbolo, nombre, monto_invertido, moneda, precio_compra,
+                        cantidad_titulos, fecha_compra, cuenta_id, notas
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        nueva.simbolo,
+                        nueva.nombre,
+                        nueva.monto_invertido,
+                        nueva.moneda,
+                        nueva.precio_compra,
+                        nueva.cantidad_titulos,
+                        nueva.fecha_compra,
+                        nueva.cuenta_id,
+                        nueva.notas,
+                    ),
+                )
+                if filas:
+                    guardada_bd = nueva.con_id(filas[0][0])
+            except Exception:
+                guardada_bd = None
+
+        if guardada_bd is not None:
+            if self._cache_inversiones_bd is not None:
+                self._cache_inversiones_bd.insert(0, guardada_bd)
+            return guardada_bd
+
+        guardada = nueva.con_id(len(self._inversiones_memoria) + 1)
+        self._inversiones_memoria.insert(0, guardada)
+        if self._cache_inversiones_bd is not None:
+            self._cache_inversiones_bd.insert(0, guardada)
+        return guardada
+
+    def eliminar_inversion(self, id_inversion: int) -> bool:
+        if self._cache_inversiones_bd is not None:
+            self._cache_inversiones_bd = [
+                inv for inv in self._cache_inversiones_bd if inv.id != id_inversion
+            ]
+        self._inversiones_memoria = [
+            inv for inv in self._inversiones_memoria if inv.id != id_inversion
+        ]
+        if hasattr(self._repositorio, "eliminar_inversion"):
+            try:
+                return self._repositorio.eliminar_inversion(id_inversion)
+            except Exception:
+                pass
+        if hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._asegurar_tabla_inversion_bd()
+                filas = self._repositorio.ejecutar_consulta(
+                    "DELETE FROM inversion WHERE id = %s RETURNING id",
+                    (id_inversion,),
+                )
+                return bool(filas)
+            except Exception:
+                pass
+        return True
+
+    def limpiar_todas_las_inversiones(self) -> None:
+        """Elimina todas las posiciones del portafolio actual (en base de datos y en memoria)."""
+        self._inversiones_memoria.clear()
+        self._cache_inversiones_bd = []
+        if hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._asegurar_tabla_inversion_bd()
+                self._repositorio.ejecutar_consulta("DELETE FROM inversion")
+            except Exception:
+                pass
+
+    def previsualizar_importacion_etoro(
+        self, ruta_archivo: str, agrupar_por_ticker: bool = False
+    ) -> List[Dict[str, object]]:
+        """Analiza un archivo Excel (.xlsx) de Estado de Cuenta de eToro o un CSV de portafolio
+        y devuelve ÚNICAMENTE las posiciones abiertas (por defecto cada transacción por separado)."""
+        return parsear_archivo_etoro_o_csv(ruta_archivo, agrupar_por_ticker=agrupar_por_ticker)
+
+    def previsualizar_importacion_broker(
+        self, ruta_archivo: str, broker: str, agrupar_por_ticker: bool = False
+    ) -> List[Dict[str, object]]:
+        """Analiza un archivo de exportación del broker indicado (eToro, Binance,
+        Interactive Brokers, Trii o Hapi) y devuelve las posiciones a importar."""
+        return parsear_archivo_broker(
+            ruta_archivo, broker, agrupar_por_ticker=agrupar_por_ticker)
+
+    def importar_inversiones_lote(
+        self,
+        posiciones_detectadas: Sequence[Dict[str, object]],
+        limpiar_antes: bool = True,
+        omitir_duplicados: bool = False,
+    ) -> Tuple[List[Inversion], int]:
+        """Guarda en la base de datos un lote de posiciones abiertas provenientes de un broker.
+
+        - Si `limpiar_antes=True`, limpia primero las inversiones anteriores
+          para no duplicar.
+        - Si `omitir_duplicados=True` (y no se limpia antes), compara cada
+          posición contra las inversiones ya guardadas y también contra las
+          demás filas del mismo archivo, y omite las que ya existan.
+          Una posición se considera duplicada cuando coincide el símbolo,
+          la fecha de compra y el monto invertido (en centavos).
+        Devuelve (lista de importadas, cantidad de duplicadas omitidas).
+        """
+        omitidas = 0
+        posiciones_finales = list(posiciones_detectadas)
+        if omitir_duplicados and not limpiar_antes:
+            existentes = self.obtener_inversiones(forzar_bd=True)
+            claves_existentes = {
+                clave_duplicado_inversion(inv) for inv in existentes
+            }
+            vistos_en_lote: set = set()
+            sin_duplicados: List[Dict[str, object]] = []
+            for posicion in posiciones_finales:
+                clave = clave_duplicado_posicion(posicion)
+                if clave in claves_existentes or clave in vistos_en_lote:
+                    omitidas += 1
+                    continue
+                vistos_en_lote.add(clave)
+                sin_duplicados.append(posicion)
+            posiciones_finales = sin_duplicados
+        elif omitir_duplicados and limpiar_antes:
+            # Reemplazar y omitir duplicados a la vez no tiene efecto
+            # (se borra todo antes), pero se respeta el conteo en cero.
+            omitidas = 0
+
+        if limpiar_antes:
+            self.limpiar_todas_las_inversiones()
+
+        importadas: List[Inversion] = []
+        for item in posiciones_finales:
+            simbolo_bruto = str(item.get("simbolo", "")).strip().upper()
+            simbolo = normalizar_simbolo_yahoo(simbolo_bruto)
+            nombre = str(item.get("nombre", simbolo)).strip()
+            if simbolo_bruto in MAPA_CRIPTO_A_YAHOO and nombre.upper() in (simbolo_bruto, simbolo):
+                nombre = MAPA_CRIPTO_A_YAHOO[simbolo_bruto][1]
+            monto: Decimal = item.get("monto_invertido", Decimal("0"))  # type: ignore[assignment]
+            moneda = str(item.get("moneda", "USD")).strip().upper()
+            precio_compra: Optional[Decimal] = item.get("precio_compra")  # type: ignore[assignment]
+            unidades: Optional[Decimal] = item.get("unidades")  # type: ignore[assignment]
+            fecha_c = item.get("fecha_compra")
+            notas = str(item.get("notas", "Importado de eToro")).strip()
+
+            if not simbolo or monto <= Decimal("0"):
+                continue
+
+            if (precio_compra is None or precio_compra <= Decimal("0")) and unidades and unidades > Decimal("0"):
+                precio_compra = (monto / unidades).quantize(
+                    Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                )
+
+            fecha_obj = fecha_c if isinstance(fecha_c, date) else date.today()
+            # Validar precio de apertura contra el precio histórico real de Yahoo Finance en la fecha de compra
+            # para corregir splits de acciones o discrepancias de 'Units / Contracts' en el Excel de eToro
+            precio_hist = self.consultar_precio_historico_inversion(
+                simbolo, fecha_obj, moneda_esperada=moneda
+            )
+            if precio_hist is not None and precio_hist > Decimal("0"):
+                if precio_compra is None or precio_compra <= Decimal("0"):
+                    precio_compra = precio_hist
+                else:
+                    desviacion = abs(precio_compra - precio_hist) / precio_hist
+                    if desviacion > Decimal("0.25"):
+                        precio_compra = precio_hist
+
+            fecha_str = fecha_obj.isoformat()
+            precio_str = f"{precio_compra:.8f}" if (precio_compra and precio_compra > Decimal("0")) else None
+            guardada = self.registrar_inversion(
+                simbolo=simbolo,
+                nombre=nombre,
+                monto_texto=f"{monto:.2f}",
+                moneda=moneda,
+                precio_compra_texto=precio_str,
+                fecha_texto=fecha_str,
+                notas=notas,
+            )
+            if guardada.id is not None:
+                self._inversiones_verificadas_sesion.add(guardada.id)
+            importadas.append(guardada)
+        return importadas, omitidas
+
+    def exportar_plantilla_etoro_csv(self, ruta_destino: str) -> None:
+        generar_plantilla_csv_etoro(ruta_destino)
+
+    def exportar_plantilla_csv(self, ruta_destino: str) -> None:
+        """Plantilla CSV genérica para armar un portafolio a mano
+        (usada por Trii y Hapi, que no tienen exportación pública)."""
+        generar_plantilla_csv_etoro(ruta_destino)
+
+    def _actualizar_inversion_saneada(self, inv_actualizada: Inversion) -> None:
+        """Actualiza en la base de datos y en memoria una inversión cuyo símbolo cripto o precio
+        de apertura pre-split/corrupto fue reparado automáticamente."""
+        if inv_actualizada.id is not None and hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._asegurar_tabla_inversion_bd()
+                self._repositorio.ejecutar_consulta(
+                    """
+                    UPDATE inversion
+                    SET simbolo = %s,
+                        nombre = %s,
+                        precio_compra = %s,
+                        cantidad_titulos = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        inv_actualizada.simbolo,
+                        inv_actualizada.nombre,
+                        inv_actualizada.precio_compra,
+                        inv_actualizada.cantidad_titulos,
+                        inv_actualizada.id,
+                    ),
+                )
+            except Exception:
+                pass
+        for idx, item in enumerate(self._inversiones_memoria):
+            if item.id == inv_actualizada.id:
+                self._inversiones_memoria[idx] = inv_actualizada
+                break
+        if self._cache_inversiones_bd is not None:
+            for idx, item in enumerate(self._cache_inversiones_bd):
+                if item.id == inv_actualizada.id:
+                    self._cache_inversiones_bd[idx] = inv_actualizada
+                    break
+
+    def _sanear_inversiones_existentes(
+        self, inversiones: List[Inversion], permitir_red: bool = True
+    ) -> List[Inversion]:
+        """Auto-repara inversiones previamente guardadas:
+        1) Convierte símbolos cortos de cripto ('BTC' -> 'BTC-USD', 'SOL' -> 'SOL-USD', 'ETH' -> 'ETH-USD') en 0ms.
+        2) Si `permitir_red=True` (hilo secundario), verifica el precio histórico en la fecha de apertura."""
+        saneadas: List[Inversion] = []
+        hay_red = permitir_red and self.hay_conexion_internet(usar_cache_breve=True)
+
+        for inv in inversiones:
+            sim_orig = inv.simbolo.strip().upper()
+            sim_norm = normalizar_simbolo_yahoo(sim_orig)
+            nom_nuevo = inv.nombre
+            if sim_orig in MAPA_CRIPTO_A_YAHOO and (
+                nom_nuevo.strip().upper() in (sim_orig, sim_norm)
+            ):
+                nom_nuevo = MAPA_CRIPTO_A_YAHOO[sim_orig][1]
+
+            precio_c = inv.precio_compra
+            cant_t = inv.cantidad_titulos
+            cambio = sim_norm != sim_orig or nom_nuevo != inv.nombre
+
+            debe_verificar_hist = (
+                hay_red
+                and (inv.id is None or inv.id not in self._inversiones_verificadas_sesion)
+                and (
+                    cambio
+                    or (inv.notas and ("etoro" in inv.notas.lower() or "importado" in inv.notas.lower()))
+                )
+            )
+            if debe_verificar_hist:
+                if inv.id is not None:
+                    self._inversiones_verificadas_sesion.add(inv.id)
+                precio_hist = self.consultar_precio_historico_inversion(
+                    sim_norm, inv.fecha_compra, moneda_esperada=inv.moneda
+                )
+                if precio_hist is not None and precio_hist > Decimal("0"):
+                    desviacion = abs(precio_c - precio_hist) / precio_hist
+                    if desviacion > Decimal("0.25"):
+                        precio_c = precio_hist
+                        cant_t = (inv.monto_invertido / precio_c).quantize(
+                            Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                        )
+                        if cant_t <= Decimal("0"):
+                            cant_t = Decimal("0.00000001")
+                        cambio = True
+
+            if cambio:
+                inv_rep = Inversion(
+                    id=inv.id,
+                    simbolo=sim_norm,
+                    nombre=nom_nuevo,
+                    monto_invertido=inv.monto_invertido,
+                    moneda=inv.moneda,
+                    precio_compra=precio_c,
+                    cantidad_titulos=cant_t,
+                    fecha_compra=inv.fecha_compra,
+                    cuenta_id=inv.cuenta_id,
+                    notas=inv.notas,
+                )
+                self._actualizar_inversion_saneada(inv_rep)
+                saneadas.append(inv_rep)
+            else:
+                saneadas.append(inv)
+        return saneadas
+
+    def valorar_portafolio(
+        self,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = True,
+        forzar_actualizacion: bool = False,
+        permitir_red: bool = True,
+    ) -> Dict[str, object]:
+        """Calcula la valoración dinámica de todas las inversiones del usuario.
+        Cuando `permitir_red=False`, responde en <2ms desde memoria/caché sin bloquear la interfaz."""
+        mon_dest = self._validar_moneda(moneda_objetivo)
+        inversiones = self._sanear_inversiones_existentes(
+            self.obtener_inversiones(), permitir_red=permitir_red
+        )
+
+        posiciones: List[ValoracionInversion] = []
+        capital_total = Decimal("0")
+        valor_actual_total = Decimal("0")
+        usando_cache = False
+        faltan_precios_vivos = False
+
+        # Consultar una sola vez por cada ticker único
+        cotizaciones_por_simbolo: Dict[str, Optional[Cotizacion]] = {}
+        for inv in inversiones:
+            if not incluir_todas_convertidas and inv.moneda != mon_dest:
+                continue
+            if inv.simbolo not in cotizaciones_por_simbolo:
+                if inv.simbolo not in self._precios_inversion_vivos_sesion:
+                    faltan_precios_vivos = True
+                cotizaciones_por_simbolo[inv.simbolo] = self.consultar_precio_inversion(
+                    inv.simbolo,
+                    moneda_esperada="USD",
+                    forzar_actualizacion=forzar_actualizacion,
+                    permitir_red=permitir_red,
+                )
+            if (
+                inv.id is not None
+                and inv.id not in self._inversiones_verificadas_sesion
+                and inv.notas
+                and ("etoro" in inv.notas.lower() or "importado" in inv.notas.lower())
+            ):
+                faltan_precios_vivos = True
+
+        for inv in inversiones:
+            if not incluir_todas_convertidas and inv.moneda != mon_dest:
+                continue
+
+            cot = cotizaciones_por_simbolo.get(inv.simbolo)
+            desde_cache_item = False
+            fecha_cot = inv.fecha_compra
+
+            if cot is not None and cot.precio > Decimal("0"):
+                desde_cache_item = "Caché" in (cot.fuente or "")
+                fecha_cot = cot.fecha
+                if inv.moneda == cot.moneda:
+                    precio_actual_moneda_inv = cot.precio
+                else:
+                    try:
+                        precio_actual_moneda_inv = self.convertir_entre_monedas(
+                            cot.precio, cot.moneda, inv.moneda
+                        )
+                    except ErrorValidacion:
+                        precio_actual_moneda_inv = inv.precio_compra
+            else:
+                desde_cache_item = True
+                precio_actual_moneda_inv = inv.precio_compra
+
+            if desde_cache_item:
+                usando_cache = True
+
+            valor_actual_nativo = (inv.cantidad_titulos * precio_actual_moneda_inv).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            ganancia_nativa = (valor_actual_nativo - inv.monto_invertido).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            rendimiento_pct = (
+                ((ganancia_nativa / inv.monto_invertido) * Decimal("100")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                if inv.monto_invertido > Decimal("0")
+                else Decimal("0.00")
+            )
+
+            if inv.moneda == mon_dest:
+                monto_inv_conv = inv.monto_invertido
+                valor_act_conv = valor_actual_nativo
+            else:
+                cot_tasa = self.obtener_tasa_cambio(
+                    inv.moneda, mon_dest, forzar_actualizacion=False, permitir_red=permitir_red
+                )
+                if cot_tasa is not None and cot_tasa.precio > Decimal("0"):
+                    monto_inv_conv = (inv.monto_invertido * cot_tasa.precio).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    valor_act_conv = (valor_actual_nativo * cot_tasa.precio).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                else:
+                    faltan_precios_vivos = True
+                    monto_inv_conv = inv.monto_invertido
+                    valor_act_conv = valor_actual_nativo
+
+            ganancia_conv = (valor_act_conv - monto_inv_conv).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+
+            capital_total += monto_inv_conv
+            valor_actual_total += valor_act_conv
+
+            posiciones.append(
+                ValoracionInversion(
+                    inversion=inv,
+                    precio_actual=precio_actual_moneda_inv,
+                    valor_actual=valor_actual_nativo,
+                    ganancia_perdida=ganancia_nativa,
+                    rendimiento_porcentaje=rendimiento_pct,
+                    moneda_visualizacion=mon_dest,
+                    monto_invertido_convertido=monto_inv_conv,
+                    valor_actual_convertido=valor_act_conv,
+                    ganancia_perdida_convertida=ganancia_conv,
+                    desde_cache=desde_cache_item,
+                    fecha_cotizacion=fecha_cot,
+                )
+            )
+
+        ganancia_neta_total = (valor_actual_total - capital_total).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        rendimiento_total_pct = (
+            ((ganancia_neta_total / capital_total) * Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if capital_total > Decimal("0")
+            else Decimal("0.00")
+        )
+
+        return {
+            "posiciones": posiciones,
+            "capital_invertido": capital_total,
+            "valor_actual_mercado": valor_actual_total,
+            "ganancia_perdida_neta": ganancia_neta_total,
+            "rendimiento_porcentaje": rendimiento_total_pct,
+            "en_ganancia": ganancia_neta_total >= Decimal("0"),
+            "desde_cache": usando_cache,
+            "faltan_precios_vivos": faltan_precios_vivos,
+            "moneda": mon_dest,
+        }
+
+    def obtener_serie_montana_portafolio(
+        self,
+        marco_tiempo: str = "1M",
+        simbolo_filtro: Optional[str] = None,
+        moneda_objetivo: str = "COP",
+        incluir_todas_convertidas: bool = True,
+        valoracion_precalculada: Optional[Dict[str, object]] = None,
+        forzar_actualizacion: bool = False,
+        permitir_red: bool = True,
+    ) -> Dict[str, object]:
+        """Construye la serie histórica `(etiqueta, valor)` para renderizar el gráfico estilo
+        montaña (formato eToro) en los marcos `1D`, `1W`, `1M`, `1Y`."""
+        mon_dest = self._validar_moneda(moneda_objetivo)
+        valoracion = (
+            valoracion_precalculada
+            if valoracion_precalculada is not None
+            else self.valorar_portafolio(
+                moneda_objetivo=mon_dest,
+                incluir_todas_convertidas=incluir_todas_convertidas,
+                forzar_actualizacion=False,
+                permitir_red=permitir_red,
+            )
+        )
+        posiciones: List[ValoracionInversion] = list(valoracion.get("posiciones", []))  # type: ignore[arg-type]
+        if simbolo_filtro:
+            sim_up = simbolo_filtro.strip().upper()
+            posiciones = [p for p in posiciones if p.inversion.simbolo == sim_up]
+
+        if not posiciones:
+            return {
+                "puntos": [],
+                "en_ganancia": True,
+                "cambio_absoluto": Decimal("0.00"),
+                "cambio_porcentaje": Decimal("0.00"),
+                "valor_inicial": Decimal("0.00"),
+                "valor_final": Decimal("0.00"),
+            }
+
+        # Intentar construir la curva real sumando las series históricas de cada activo
+        series_por_simbolo: Dict[str, List[Tuple[str, Decimal]]] = {}
+        for pos in posiciones:
+            sim = pos.inversion.simbolo
+            if sim not in series_por_simbolo:
+                if not permitir_red:
+                    cache_s = getattr(self._servicio_bursatil, "_cache_series_temporales", {})
+                    series_por_simbolo[sim] = list(cache_s.get((sim, (marco_tiempo or "1M").strip().upper()), []))
+                    continue
+                try:
+                    series_por_simbolo[sim] = self._servicio_bursatil.consultar_serie_temporal(
+                        sim,
+                        marco_tiempo=marco_tiempo,
+                        forzar_actualizacion=forzar_actualizacion,
+                    )
+                except TypeError:
+                    try:
+                        series_por_simbolo[sim] = self._servicio_bursatil.consultar_serie_temporal(
+                            sim, marco_tiempo=marco_tiempo
+                        )
+                    except Exception:
+                        series_por_simbolo[sim] = []
+                except Exception:
+                    series_por_simbolo[sim] = []
+
+        # Factor de conversión USD -> mon_dest
+        tasa_usd_dest = Decimal("1.00")
+        if mon_dest != "USD":
+            cot_fx = self.obtener_tasa_cambio(
+                "USD", mon_dest, forzar_actualizacion=False, permitir_red=permitir_red
+            )
+            if cot_fx is not None and cot_fx.precio > Decimal("0"):
+                tasa_usd_dest = cot_fx.precio
+
+        # Si hay al menos una serie con datos reales de Yahoo Finance, agregamos punto por punto
+        serie_base = next((s for s in series_por_simbolo.values() if len(s) >= 2), None)
+        puntos_curva: List[Tuple[str, Decimal]] = []
+
+        if serie_base is not None:
+            num_puntos = len(serie_base)
+            for idx in range(num_puntos):
+                etiqueta_t = serie_base[idx][0]
+                suma_punto = Decimal("0")
+                for pos in posiciones:
+                    serie_act = series_por_simbolo.get(pos.inversion.simbolo, [])
+                    if serie_act:
+                        i_efectivo = min(idx, len(serie_act) - 1)
+                        precio_usd = serie_act[i_efectivo][1]
+                        # Cantidad equivalente en USD o moneda nativa
+                        if pos.inversion.moneda == "USD":
+                            val_usd = pos.inversion.cantidad_titulos * precio_usd
+                            suma_punto += (val_usd * tasa_usd_dest)
+                        else:
+                            # Escalar proporcionalmente respecto al último precio de la serie
+                            ultimo_p = serie_act[-1][1]
+                            factor = (precio_usd / ultimo_p) if ultimo_p > Decimal("0") else Decimal("1")
+                            suma_punto += (pos.valor_actual_convertido * factor)
+                    else:
+                        suma_punto += pos.valor_actual_convertido
+                puntos_curva.append(
+                    (etiqueta_t, suma_punto.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                )
+        else:
+            # Respaldo determinista cuando no hay conexión (interpola entre capital invertido y valor actual)
+            cap_ini = sum((p.monto_invertido_convertido for p in posiciones), Decimal("0"))
+            val_fin = sum((p.valor_actual_convertido for p in posiciones), Decimal("0"))
+            pesos = [0.0, 0.18, 0.12, 0.35, 0.28, 0.52, 0.48, 0.72, 0.68, 0.88, 0.94, 1.0]
+            diferencia = val_fin - cap_ini
+            # Si cap_ini == val_fin, mostrar ligera oscilación alrededor de cap_ini
+            amplitud = diferencia if diferencia != Decimal("0") else (cap_ini * Decimal("0.015"))
+            for idx, w in enumerate(pesos):
+                if diferencia != Decimal("0"):
+                    v = cap_ini + (diferencia * Decimal(str(w)))
+                else:
+                    ond = Decimal(str((w - 0.5) * 0.4))
+                    v = cap_ini + (amplitud * ond) if idx < len(pesos) - 1 else val_fin
+                puntos_curva.append(
+                    (f"P{idx + 1}", v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                )
+
+        valor_inicial = puntos_curva[0][1]
+        valor_final = puntos_curva[-1][1]
+        cambio_abs = (valor_final - valor_inicial).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        cambio_pct = (
+            ((cambio_abs / valor_inicial) * Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if valor_inicial > Decimal("0")
+            else Decimal("0.00")
+        )
+
+        return {
+            "puntos": puntos_curva,
+            "en_ganancia": cambio_abs >= Decimal("0"),
+            "cambio_absoluto": cambio_abs,
+            "cambio_porcentaje": cambio_pct,
+            "valor_inicial": valor_inicial,
+            "valor_final": valor_final,
+        }
 
     # ------------------------------------------------------------------
     # Validaciones internas

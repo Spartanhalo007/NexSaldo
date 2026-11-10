@@ -71,6 +71,7 @@ class DialogoGasto(ctk.CTkToplevel):
         self._fecha_elegida: date = date.today()
         self._modo_fecha: str = "HOY"
         self._etiquetas_elegidas: List[str] = []
+        self._widgets_categorias: Dict[str, tuple] = {}
         self._ruta_imagen: Optional[str] = None
 
         self.title("Añadir gasto")
@@ -575,7 +576,21 @@ class DialogoGasto(ctk.CTkToplevel):
         self._id_consulta_tasa += 1
         id_actual = self._id_consulta_tasa
         moneda_consulta = self._moneda_elegida
-        self._cotizacion_trm = None
+
+        # Si la tasa ya está en memoria de esta sesión y no se pidió forzar, aplicarla en 0ms
+        if not forzar and hasattr(self._gestor, "obtener_tasa_cambio_instantanea"):
+            cot_inst = self._gestor.obtener_tasa_cambio_instantanea(moneda_consulta, "COP")
+            if cot_inst is not None and "Caché" not in (cot_inst.fuente or ""):
+                self._al_recibir_tasa_yahoo(id_actual, moneda_consulta, cot_inst, True)
+                return
+            if cot_inst is not None:
+                self._cotizacion_trm = cot_inst
+                self._al_escribir_campo_principal()
+            else:
+                self._cotizacion_trm = None
+        else:
+            self._cotizacion_trm = None
+
         self._etiqueta_tasa_yahoo.configure(
             text=f"Consultando tasa {moneda_consulta} -> COP en Yahoo Finance...",
             text_color=COLORES["texto_secundario"],
@@ -583,12 +598,12 @@ class DialogoGasto(ctk.CTkToplevel):
 
         def _tarea_fondo():
             hay_red = (
-                self._gestor.hay_conexion_internet(usar_cache_breve=False)
+                self._gestor.hay_conexion_internet(usar_cache_breve=not forzar)
                 if hasattr(self._gestor, "hay_conexion_internet")
                 else True
             )
             cot = self._gestor.obtener_tasa_cambio(
-                moneda_consulta, "COP", forzar_actualizacion=(forzar or hay_red)
+                moneda_consulta, "COP", forzar_actualizacion=forzar
             )
             try:
                 if self.winfo_exists():
@@ -764,6 +779,7 @@ class DialogoGasto(ctk.CTkToplevel):
     # Lógica de Categorías Circulares + Botón Gris "Más"
     # ------------------------------------------------------------------
     def _renderizar_categorias(self):
+        self._widgets_categorias.clear()
         for hijo in self._rejilla_categorias.winfo_children():
             hijo.destroy()
 
@@ -803,12 +819,14 @@ class DialogoGasto(ctk.CTkToplevel):
             if cat.gasto_programado:
                 subtexto = f"{cat.nombre} ⏱"
 
-            ctk.CTkLabel(
+            lbl_cat = ctk.CTkLabel(
                 celda,
                 text=subtexto,
                 font=(FUENTE, 11, "bold" if activa else "normal"),
                 text_color=COLORES["acento"] if activa else COLORES["texto"],
-            ).pack(pady=(3, 0))
+            )
+            lbl_cat.pack(pady=(3, 0))
+            self._widgets_categorias[cat.nombre] = (btn, lbl_cat)
 
         idx_mas = len(categorias)
         fila_mas = idx_mas // columnas
@@ -845,8 +863,20 @@ class DialogoGasto(ctk.CTkToplevel):
         return self._categoria_elegida
 
     def _seleccionar_categoria(self, nombre_categoria: str):
+        anterior = self._categoria_elegida
         self._categoria_elegida = nombre_categoria
-        self._renderizar_categorias()
+        if anterior in self._widgets_categorias and nombre_categoria in self._widgets_categorias:
+            btn_ant, lbl_ant = self._widgets_categorias[anterior]
+            btn_ant.configure(border_width=0)
+            lbl_ant.configure(font=(FUENTE, 11, "normal"), text_color=COLORES["texto"])
+            btn_nue, lbl_nue = self._widgets_categorias[nombre_categoria]
+            btn_nue.configure(border_width=3, border_color="#FFFFFF")
+            lbl_nue.configure(font=(FUENTE, 11, "bold"), text_color=COLORES["acento"])
+            self._etiqueta_cat_seleccionada.configure(
+                text=f"Seleccionada: {self._categoria_elegida}"
+            )
+        else:
+            self._renderizar_categorias()
 
     def _abrir_crear_categoria(self):
         DialogoCategoria(
@@ -1049,5 +1079,11 @@ class DialogoGasto(ctk.CTkToplevel):
             messagebox.showwarning("No se pudo guardar el gasto", str(error), parent=self)
             return
 
-        self._al_guardar(movimiento)
+        callback = self._al_guardar
+        try:
+            self.grab_release()
+        except Exception:
+            pass
         self.destroy()
+        if callback is not None:
+            callback(movimiento)

@@ -1,8 +1,9 @@
-"""Vista principal del Módulo de Ingresos para NexSaldo con selector de periodo estilo Shopify
+"""Vista principal del Módulo de Ingresos para NexSaldo con selector de periodo estilo píldora de fechas
 (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`), filtro mundial de divisas ('Solo esta moneda' vs 'Todo convertido'),
 gráfica circular de ingresos, desglose por categoría e historial detallado."""
 
 from datetime import date
+import threading
 from decimal import Decimal
 import tkinter as tk
 from tkinter import messagebox
@@ -11,8 +12,8 @@ import customtkinter as ctk
 
 from app.gestor.gestor_financiero import GestorFinanciero
 from app.gui.dialogo_ingreso import DialogoIngreso
-from app.gui.dialogo_periodo_shopify import (
-    DialogoPeriodoShopify,
+from app.gui.dialogo_periodo import (
+    DialogoPeriodo,
     calcular_rango_preset,
     desplazar_rango,
 )
@@ -26,7 +27,7 @@ GROSOR_DONA = 34
 
 
 class VistaIngresos(ctk.CTkFrame):
-    """Muestra la gráfica circular de ingresos por periodo usando el selector clicable estilo Shopify,
+    """Muestra la gráfica circular de ingresos por periodo usando el selector clicable estilo píldora de fechas,
     el filtro mundial de divisas ('Solo esta moneda' o 'Todo convertido'), el botón amarillo
     'Añadir ingreso', el desglose 'Ingresos por categoría en el periodo' y la lista
     'Movimientos de ingresos registrados en este periodo'."""
@@ -51,7 +52,7 @@ class VistaIngresos(ctk.CTkFrame):
         contenedor.pack(fill="both", expand=True, padx=24, pady=18)
 
         # ==================================================================
-        # 1. CABECERA, SELECTOR DE PERIODO ESTILO SHOPIFY Y BOTÓN AMARILLO "Añadir ingreso"
+        # 1. CABECERA, SELECTOR DE PERIODO ESTILO PÍLDORA DE FECHAS Y BOTÓN AMARILLO "Añadir ingreso"
         # ==================================================================
         fila_superior = ctk.CTkFrame(contenedor, fg_color="transparent")
         fila_superior.pack(fill="x", pady=(0, 10))
@@ -103,7 +104,7 @@ class VistaIngresos(ctk.CTkFrame):
             border_color=COLORES["acento"],
             text_color=COLORES["texto"],
             font=(FUENTE, 13, "bold"),
-            command=self._abrir_selector_periodo_shopify,
+            command=self._abrir_selector_periodo,
         )
         self._boton_periodo.pack(side="left", padx=6)
 
@@ -208,18 +209,18 @@ class VistaIngresos(ctk.CTkFrame):
         self._contenedor_historial.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
     # ------------------------------------------------------------------
-    # Manejo del Selector de Periodo estilo Shopify y Moneda
+    # Manejo del Selector de Periodo estilo píldora de fechas y Moneda
     # ------------------------------------------------------------------
-    def _abrir_selector_periodo_shopify(self):
-        DialogoPeriodoShopify(
+    def _abrir_selector_periodo(self):
+        DialogoPeriodo(
             self,
             fecha_inicio=self._fecha_inicio,
             fecha_fin=self._fecha_fin,
             preset_inicial=self._preset_periodo,
-            al_aplicar=self._al_aplicar_periodo_shopify,
+            al_aplicar=self._al_aplicar_periodo,
         )
 
-    def _al_aplicar_periodo_shopify(
+    def _al_aplicar_periodo(
         self, fecha_ini: date, fecha_fin: date, preset: str, etiqueta: str
     ):
         self._fecha_inicio = fecha_ini
@@ -247,7 +248,10 @@ class VistaIngresos(ctk.CTkFrame):
     # ------------------------------------------------------------------
     # Gráfica Circular (Dona) y Actualización de Datos
     # ------------------------------------------------------------------
-    def _refrescar_vista(self):
+    def refrescar(self):
+        self._refrescar_vista()
+
+    def _refrescar_vista(self, _desde_hilo_tasas: bool = False):
         fecha_ini = self._fecha_inicio
         fecha_fin = self._fecha_fin
         sufijo_modo = (
@@ -258,6 +262,31 @@ class VistaIngresos(ctk.CTkFrame):
         self._titulo_rango.configure(
             text=f"Ingresos · {self._texto_periodo} ({sufijo_modo})"
         )
+
+        todos_movimientos = self._gestor.obtener_movimientos(
+            "INGRESO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+        )
+        if self._incluir_todas_convertidas and not _desde_hilo_tasas and hasattr(self._gestor, "tiene_tasa_en_sesion"):
+            monedas_faltantes = {
+                m.moneda
+                for m in todos_movimientos
+                if m.moneda != self._moneda_grafica
+                and not self._gestor.tiene_tasa_en_sesion(m.moneda, self._moneda_grafica)
+            }
+            if monedas_faltantes:
+                mon_dest_bg = self._moneda_grafica
+
+                def _precargar_tasas():
+                    for mon_orig in monedas_faltantes:
+                        try:
+                            self._gestor.obtener_tasa_cambio(mon_orig, mon_dest_bg, forzar_actualizacion=False)
+                        except Exception:
+                            pass
+                    if self.winfo_exists():
+                        self.after(0, lambda: self._refrescar_vista(_desde_hilo_tasas=True))
+
+                threading.Thread(target=_precargar_tasas, daemon=True).start()
+                return
 
         resumen_global = self._gestor.resumen_ingresos_periodo(
             fecha_inicio=fecha_ini,
@@ -276,7 +305,7 @@ class VistaIngresos(ctk.CTkFrame):
 
         self._dibujar_dona(total, por_cat, colores)
         self._renderizar_desglose(total, por_cat, colores, simbolos)
-        self._renderizar_historial(fecha_ini, fecha_fin)
+        self._renderizar_historial(fecha_ini, fecha_fin, movimientos_precargados=todos_movimientos)
 
     def _dibujar_dona(
         self,
@@ -430,13 +459,20 @@ class VistaIngresos(ctk.CTkFrame):
             ).pack(side="right", padx=6)
 
     def _renderizar_historial(
-        self, fecha_ini: Optional[date], fecha_fin: Optional[date]
+        self,
+        fecha_ini: Optional[date],
+        fecha_fin: Optional[date],
+        movimientos_precargados=None,
     ):
         for hijo in self._contenedor_historial.winfo_children():
             hijo.destroy()
 
-        todos_movimientos = self._gestor.obtener_movimientos(
-            "INGRESO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+        todos_movimientos = (
+            movimientos_precargados
+            if movimientos_precargados is not None
+            else self._gestor.obtener_movimientos(
+                "INGRESO", fecha_inicio=fecha_ini, fecha_fin=fecha_fin
+            )
         )
         if self._incluir_todas_convertidas:
             movimientos = todos_movimientos

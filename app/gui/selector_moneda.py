@@ -293,7 +293,7 @@ class BarraFiltroMoneda(ctk.CTkFrame):
             hover_color=COLORES["hover_lateral"],
             text_color=COLORES["texto"],
             font=(FUENTE, 11, "bold"),
-            command=lambda: self._verificar_conexion_asincrona(notificar_si_reconecta=True),
+            command=lambda: self._verificar_conexion_asincrona(notificar_si_reconecta=True, forzar_red=True),
         )
         self._boton_reintentar_red.pack(side="right", padx=(8, 0))
 
@@ -314,22 +314,36 @@ class BarraFiltroMoneda(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _verificar_conexion_asincrona(self, notificar_si_reconecta: bool = True):
-        """Consulta en segundo plano si hay internet y actualiza la cotización de referencia."""
+    def _verificar_conexion_asincrona(
+        self, notificar_si_reconecta: bool = True, forzar_red: bool = False
+    ):
+        """Consulta en segundo plano si hay internet y reutiliza la caché de sesión sin bloquear."""
         if self._verificando_red or not self.winfo_exists():
             return
-        self._verificando_red = True
         moneda_ref = self._moneda_actual if self._moneda_actual != "COP" else "USD"
+        # Si ya estamos online y la tasa ya está en sesión, no lanzar hilos redundantes
+        if (
+            not forzar_red
+            and not self._estaba_sin_conexion
+            and hasattr(self._gestor, "tiene_tasa_en_sesion")
+            and self._gestor.tiene_tasa_en_sesion(moneda_ref, "COP")
+        ):
+            self._ocultar_banner_conexion()
+            return
+
+        self._verificando_red = True
 
         def _tarea():
             try:
                 hay_red = (
-                    self._gestor.hay_conexion_internet(usar_cache_breve=False)
+                    self._gestor.hay_conexion_internet(usar_cache_breve=not forzar_red)
                     if hasattr(self._gestor, "hay_conexion_internet")
                     else True
                 )
                 cot = self._gestor.obtener_tasa_cambio(
-                    moneda_ref, "COP", forzar_actualizacion=hay_red
+                    moneda_ref,
+                    "COP",
+                    forzar_actualizacion=(forzar_red or self._estaba_sin_conexion),
                 )
                 if self.winfo_exists():
                     self.after(
