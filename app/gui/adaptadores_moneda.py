@@ -1,13 +1,25 @@
 """Envuelve VistaCuentas, VistaMovimientos y DialogoCuenta para inyectar:
 1) El filtro mundial de divisas (COP + 4 últimas usadas + lista A-Z) y el modo
    'Solo esta moneda' vs 'Todo convertido'.
-2) El selector de periodo estilo píldora de fechas (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`) exactamente
+2) El selector de periodo estilo píldora de fechas (`◄ [ 📅 Noviembre de 2026 ▾ ] ►`) exactamente
    dentro de la tarjeta 'Historial de transferencias' en Cuentas (donde estaban los radio
    buttons 'Mostrar: Día, Semana, Mes, Año, Período') y en Ingresos."""
 
 from datetime import date
 from decimal import Decimal
+import importlib
+import sys
 import customtkinter as ctk
+
+try:
+    import aplicar_cambios_nexsaldo
+
+    aplicar_cambios_nexsaldo.aplicar_todos_los_parches(silencioso=True)
+    for _mod_name in ("app.gestor.gestor_financiero", "app.gui.vista_inversiones"):
+        if _mod_name in sys.modules:
+            importlib.reload(sys.modules[_mod_name])
+except Exception:
+    pass
 
 from app.gui.dialogo_cuenta import DialogoCuenta
 from app.gui.dialogo_periodo import (
@@ -71,6 +83,11 @@ def activar_selector_mundial_en_dialogo_cuenta():
             self._campo_moneda.set(codigo)
         except Exception:
             pass
+        try:
+            if hasattr(self, "_campo_saldo") and not (self._campo_saldo.get() or "").strip():
+                self._campo_saldo.insert(0, "0")
+        except Exception:
+            pass
         return al_aniadir_original(self)
 
     DialogoCuenta.__init__ = _nuevo_init
@@ -79,7 +96,7 @@ def activar_selector_mundial_en_dialogo_cuenta():
 
 def _encontrar_fila_radios_historial(vista_cuentas: VistaCuentas):
     """Encuentra el CTkFrame (`fila_filtros`) dentro de la tarjeta 'Historial de transferencias'
-    que contiene los CTkRadioButton ('Dia', 'Semana', 'Mes', 'Año', 'Periodo')."""
+    que contiene los CTkRadioButton ('Día', 'Semana', 'Mes', 'Año', 'Periodo')."""
     resultado = []
 
     def _buscar(widget):
@@ -99,7 +116,7 @@ def _encontrar_fila_radios_historial(vista_cuentas: VistaCuentas):
 
 class VistaCuentasConDivisa(VistaCuentas):
     """Subclase de VistaCuentas que añade la BarraFiltroMoneda arriba y reemplaza la fila
-    de radio buttons ('Mostrar: Dia, Semana, Mes, Año, Periodo') dentro de la tarjeta
+    de radio buttons ('Mostrar: Día, Semana, Mes, Año, Período') dentro de la tarjeta
     'Historial de transferencias' por el selector clicable estilo píldora de fechas."""
 
     def __init__(self, master, gestor, **kwargs):
@@ -149,7 +166,7 @@ class VistaCuentasConDivisa(VistaCuentas):
 
             ctk.CTkButton(
                 fila_filtros_historial,
-                text="◀",
+                text="◄",
                 width=30,
                 height=30,
                 corner_radius=8,
@@ -162,7 +179,7 @@ class VistaCuentasConDivisa(VistaCuentas):
 
             self._boton_periodo = ctk.CTkButton(
                 fila_filtros_historial,
-                text=f"📅  {self._texto_periodo}  ▾",
+                text=f"📅 {self._texto_periodo} ▾",
                 height=30,
                 corner_radius=8,
                 fg_color=COLORES["boton_lateral"],
@@ -177,7 +194,7 @@ class VistaCuentasConDivisa(VistaCuentas):
 
             ctk.CTkButton(
                 fila_filtros_historial,
-                text="▶",
+                text="►",
                 width=30,
                 height=30,
                 corner_radius=8,
@@ -237,7 +254,7 @@ class VistaCuentasConDivisa(VistaCuentas):
         self._fecha_desde = fecha_ini
         self._fecha_hasta = fecha_fin
         if self._boton_periodo is not None:
-            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+            self._boton_periodo.configure(text=f"📅 {self._texto_periodo} ▾")
         self._refrescar_historial()
 
     def _desplazar_periodo(self, direccion: int):
@@ -250,7 +267,7 @@ class VistaCuentasConDivisa(VistaCuentas):
         self._fecha_desde = ini
         self._fecha_hasta = fin
         if self._boton_periodo is not None:
-            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+            self._boton_periodo.configure(text=f"📅 {self._texto_periodo} ▾")
         self._refrescar_historial()
 
     def _al_cambiar_moneda_vista(self, nueva_moneda: str, incluir_todas: bool):
@@ -351,7 +368,7 @@ class VistaCuentasConDivisa(VistaCuentas):
 
 class VistaMovimientosConDivisa(VistaMovimientos):
     """Subclase de VistaMovimientos (Ingresos) que añade el selector mundial de divisas y el
-    selector de periodo estilo píldora de fechas (`◀ [ 📅 Noviembre de 2026 ▾ ] ▶`)."""
+    selector de periodo estilo píldora de fechas (`◄ [ 📅 Noviembre de 2026 ▾ ] ►`)."""
 
     def __init__(self, master, gestor, filtro_tipo=None, titulo="Movimientos", **kwargs):
         hoy = date.today()
@@ -403,7 +420,7 @@ class VistaMovimientosConDivisa(VistaMovimientos):
 
         ctk.CTkButton(
             marco_periodo,
-            text="◀",
+            text="◄",
             width=32,
             height=32,
             corner_radius=8,
@@ -416,7 +433,7 @@ class VistaMovimientosConDivisa(VistaMovimientos):
 
         self._boton_periodo = ctk.CTkButton(
             marco_periodo,
-            text=f"📅  {self._texto_periodo}  ▾",
+            text=f"📅 {self._texto_periodo} ▾",
             height=32,
             corner_radius=8,
             fg_color=COLORES["boton_lateral"],
@@ -431,7 +448,7 @@ class VistaMovimientosConDivisa(VistaMovimientos):
 
         ctk.CTkButton(
             marco_periodo,
-            text="▶",
+            text="►",
             width=32,
             height=32,
             corner_radius=8,
@@ -459,7 +476,7 @@ class VistaMovimientosConDivisa(VistaMovimientos):
         self._preset_periodo = preset
         self._texto_periodo = etiqueta
         if self._boton_periodo is not None:
-            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+            self._boton_periodo.configure(text=f"📅 {self._texto_periodo} ▾")
         self.refrescar()
 
     def _desplazar_periodo(self, direccion: int):
@@ -470,7 +487,7 @@ class VistaMovimientosConDivisa(VistaMovimientos):
         self._fin_periodo = fin
         self._texto_periodo = etiqueta
         if self._boton_periodo is not None:
-            self._boton_periodo.configure(text=f"📅  {self._texto_periodo}  ▾")
+            self._boton_periodo.configure(text=f"📅 {self._texto_periodo} ▾")
         self.refrescar()
 
     def _al_cambiar_moneda_vista(self, nueva_moneda: str, incluir_todas: bool):

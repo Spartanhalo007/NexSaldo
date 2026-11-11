@@ -1314,9 +1314,9 @@ class GestorFinanciero:
         self,
         nombre: str,
         moneda: str,
-        saldo_inicial_texto: str,
-        simbolo: str,
-        color: str,
+        saldo_inicial_texto: Optional[str] = "0",
+        simbolo: str = "banco",
+        color: str = "#408FD1",
         incluye_en_total: bool = True,
         nota: Optional[str] = None,
     ) -> Cuenta:
@@ -1381,6 +1381,12 @@ class GestorFinanciero:
             raise ErrorValidacion("Las transferencias solo se permiten entre cuentas de la misma moneda.")
 
         valor = self._validar_valor(valor_texto)
+        saldo_disponible = self.obtener_saldo_cuenta(cuenta_origen_id)
+        if valor > saldo_disponible:
+            raise ErrorValidacion(
+                f"Fondos insuficientes en la cuenta '{origen.nombre}'. "
+                f"Saldo disponible: {saldo_disponible:,.2f} {origen.moneda}."
+            )
         fecha = self._validar_fecha(fecha_texto)
         comentarios_limpios = self._validar_descripcion(comentarios)
 
@@ -1613,6 +1619,253 @@ class GestorFinanciero:
         if self._cache_inversiones_bd is not None:
             self._cache_inversiones_bd.insert(0, guardada)
         return guardada
+
+    def obtener_saldo_cuenta(self, id_cuenta: int) -> Decimal:
+        """Devuelve el saldo disponible actual de la cuenta indicada."""
+        try:
+            for cuenta, saldo in self.obtener_cuentas():
+                if cuenta.id == id_cuenta:
+                    return Decimal(str(saldo))
+        except Exception:
+            pass
+        if hasattr(self._repositorio, "saldos_de_cuentas"):
+            try:
+                saldos = self._repositorio.saldos_de_cuentas()
+                if id_cuenta in saldos:
+                    return Decimal(str(saldos[id_cuenta]))
+            except Exception:
+                pass
+        cuenta_obj = self.obtener_cuenta(id_cuenta)
+        if cuenta_obj is not None:
+            return Decimal(str(cuenta_obj.saldo_inicial))
+        return Decimal("0")
+
+    def asegurar_cuenta_broker(
+        self, broker: str = "eToro", moneda: Optional[str] = None
+    ) -> Cuenta:
+        """Asegura que exista una cuenta asociada al broker (por defecto 'eToro') con saldo inicial 0."""
+        mapa_brokers = {
+            "etoro": ("eToro", "USD", "bolsa", "#2ECC71"),
+            "binance": ("Binance", "USD", "criptomonedas", "#F3BA2F"),
+            "ibkr": ("Interactive Brokers", "USD", "bolsa", "#408FD1"),
+            "interactive brokers": ("Interactive Brokers", "USD", "bolsa", "#408FD1"),
+            "trii": ("Trii", "COP", "bolsa", "#9B7EDE"),
+            "hapi": ("Hapi", "USD", "bolsa", "#408FD1"),
+        }
+        clave = (broker or "eToro").strip().lower()
+        nombre_std, moneda_def, simbolo_def, color_def = mapa_brokers.get(
+            clave, ((broker or "eToro").strip() or "eToro", "USD", "bolsa", "#2ECC71")
+        )
+        moneda_final = self._validar_moneda(moneda or moneda_def)
+
+        for cuenta, _saldo in self.obtener_cuentas():
+            if cuenta.nombre.strip().lower() == nombre_std.lower():
+                return cuenta
+
+        return self.crear_cuenta(
+            nombre=nombre_std,
+            moneda=moneda_final,
+            saldo_inicial_texto="0",
+            simbolo=simbolo_def,
+            color=color_def,
+            incluye_en_total=True,
+            nota=f"Cuenta de broker ({nombre_std}) creada automáticamente",
+        )
+
+    def obtener_cuentas_destino_inversion(
+        self, broker_preferido: str = "eToro", moneda_inversion: str = "USD"
+    ) -> List[Tuple[Cuenta, Decimal]]:
+        """Garantiza que exista la cuenta del broker y devuelve todas las cuentas disponibles."""
+        try:
+            self.asegurar_cuenta_broker(broker_preferido, moneda=moneda_inversion)
+        except Exception:
+            pass
+        return self.obtener_cuentas()
+
+    def _acreditar_saldo_cuenta_directo(self, cuenta_id: int, monto: Decimal) -> None:
+        """Incrementa el saldo de la cuenta cuando el repositorio no enlaza movimientos a cuentas."""
+        if monto <= Decimal("0"):
+            return
+        if hasattr(self._repositorio, "conectar") and hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                conexion = self._repositorio.conectar()
+                with conexion:
+                    with conexion.cursor() as cursor:
+                        cursor.execute(
+                            "UPDATE cuenta SET saldo_inicial = saldo_inicial + %s WHERE id = %s",
+                            (monto, cuenta_id),
+                        )
+                return
+            except Exception:
+                pass
+        if hasattr(self._repositorio, "_cuentas") and isinstance(self._repositorio._cuentas, dict):
+            c_mem = self._repositorio._cuentas.get(cuenta_id)
+            if c_mem is not None and hasattr(c_mem, "saldo_inicial"):
+                try:
+                    object.__setattr__(c_mem, "saldo_inicial", c_mem.saldo_inicial + monto)
+                except Exception:
+                    pass
+
+    def cerrar_inversion(
+        self,
+        id_inversion: int,
+        cuenta_destino: Optional[object] = "eToro",
+        precio_venta_unitario: Optional[object] = None,
+        valor_total_venta: Optional[object] = None,
+        fecha_cierre: Optional[date] = None,
+    ) -> Dict[str, object]:
+        """Cierra/vende una posición de inversión al valor actual del mercado (o al valor indicado),
+        convierte la divisa si la cuenta destino está en otra moneda y acredita los fondos."""
+        inversiones = self.obtener_inversiones()
+        inv_objetivo: Optional[Inversion] = None
+        for inv in inversiones:
+            if inv.id == id_inversion:
+                inv_objetivo = inv
+                break
+        if inv_objetivo is None:
+            raise ErrorValidacion(f"No se encontró la inversión con ID {id_inversion}.")
+
+        # 1. Determinar el valor total de venta en la moneda original de la inversión
+        valor_venta_origen: Optional[Decimal] = None
+        if valor_total_venta is not None and str(valor_total_venta).strip() != "":
+            try:
+                val_dec = Decimal(str(valor_total_venta).strip().replace(",", "."))
+                if val_dec > Decimal("0"):
+                    valor_venta_origen = val_dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            except Exception as exc:
+                raise ErrorValidacion("El valor total de venta no es válido.") from exc
+        elif precio_venta_unitario is not None and str(precio_venta_unitario).strip() != "":
+            try:
+                p_unit = Decimal(str(precio_venta_unitario).strip().replace(",", "."))
+                if p_unit <= Decimal("0"):
+                    raise ErrorValidacion("El precio de venta debe ser mayor que cero.")
+                valor_venta_origen = (inv_objetivo.cantidad_titulos * p_unit).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            except ErrorValidacion:
+                raise
+            except Exception as exc:
+                raise ErrorValidacion("El precio unitario de venta no es válido.") from exc
+
+        if valor_venta_origen is None:
+            try:
+                cot = self.consultar_precio_inversion(
+                    inv_objetivo.simbolo,
+                    moneda_esperada=inv_objetivo.moneda,
+                    forzar_actualizacion=False,
+                    permitir_red=True,
+                )
+            except TypeError:
+                cot = self.consultar_precio_inversion(
+                    inv_objetivo.simbolo,
+                    moneda_esperada=inv_objetivo.moneda,
+                )
+            except Exception:
+                cot = None
+
+            if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0") and inv_objetivo.cantidad_titulos > Decimal("0"):
+                valor_venta_origen = (inv_objetivo.cantidad_titulos * cot.precio).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            else:
+                valor_venta_origen = inv_objetivo.monto_invertido.quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+
+        # 2. Resolver cuenta de destino
+        cuenta_obj: Optional[Cuenta] = None
+        if isinstance(cuenta_destino, Cuenta):
+            cuenta_obj = cuenta_destino
+        elif isinstance(cuenta_destino, int):
+            cuenta_obj = self.obtener_cuenta(cuenta_destino)
+        elif isinstance(cuenta_destino, str):
+            texto_dest = cuenta_destino.strip()
+            if texto_dest and not texto_dest.lower().startswith(("no ", "ningun", "sin ")):
+                if " (" in texto_dest and texto_dest.endswith(")"):
+                    texto_dest = texto_dest.rsplit(" (", 1)[0].strip()
+                for c_item, _s in self.obtener_cuentas():
+                    if c_item.nombre.strip().lower() == texto_dest.lower():
+                        cuenta_obj = c_item
+                        break
+                if cuenta_obj is None:
+                    cuenta_obj = self.asegurar_cuenta_broker(
+                        texto_dest, moneda=inv_objetivo.moneda
+                    )
+
+        # 3. Convertir monto si la cuenta destino tiene otra divisa y acreditar saldo
+        monto_acreditado = valor_venta_origen
+        moneda_destino = inv_objetivo.moneda
+        movimiento_creado: Optional[MovimientoFinanciero] = None
+        fecha_op = fecha_cierre if isinstance(fecha_cierre, date) else date.today()
+
+        if cuenta_obj is not None:
+            moneda_destino = cuenta_obj.moneda
+            if moneda_destino != inv_objetivo.moneda:
+                try:
+                    monto_acreditado = self.convertir_entre_monedas(
+                        valor_venta_origen, inv_objetivo.moneda, moneda_destino
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                except Exception:
+                    monto_acreditado = valor_venta_origen
+
+            saldo_antes = self.obtener_saldo_cuenta(cuenta_obj.id)
+
+            # Intentar registrar movimiento de ingreso para trazabilidad
+            try:
+                cats_ingreso = []
+                if hasattr(self._repositorio, "obtener_categorias"):
+                    try:
+                        cats_ingreso = list(self._repositorio.obtener_categorias("INGRESO"))
+                    except TypeError:
+                        cats_ingreso = list(self._repositorio.obtener_categorias())
+                cat_usar = "Ventas"
+                for candidata in ("Inversiones", "Ventas", "Intereses", "Otros ingresos", "Otros", "Salario"):
+                    if not cats_ingreso or candidata in cats_ingreso:
+                        cat_usar = candidata
+                        break
+                if cats_ingreso and cat_usar not in cats_ingreso:
+                    cat_usar = cats_ingreso[0]
+
+                ganancia_origen = (valor_venta_origen - inv_objetivo.monto_invertido).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                signo = "+" if ganancia_origen >= Decimal("0") else ""
+                desc_venta = (
+                    f"Venta {inv_objetivo.simbolo} ({inv_objetivo.cantidad_titulos.quantize(Decimal('0.0001'))} títulos) "
+                    f"→ {cuenta_obj.nombre} ({signo}{ganancia_origen} {inv_objetivo.moneda})"
+                )
+                movimiento_creado = self.registrar_movimiento(
+                    tipo="INGRESO",
+                    fecha_texto=fecha_op.isoformat(),
+                    valor_texto=f"{monto_acreditado:.2f}",
+                    moneda=moneda_destino,
+                    categoria=cat_usar,
+                    descripcion=desc_venta[:200],
+                    cuenta_id=cuenta_obj.id,
+                )
+            except Exception:
+                movimiento_creado = None
+
+            saldo_despues = self.obtener_saldo_cuenta(cuenta_obj.id)
+            if saldo_despues < saldo_antes + monto_acreditado:
+                self._acreditar_saldo_cuenta_directo(cuenta_obj.id, monto_acreditado)
+
+        # 4. Eliminar la posición cerrada del portafolio activo
+        self.eliminar_inversion(id_inversion)
+
+        ganancia_neta = (valor_venta_origen - inv_objetivo.monto_invertido).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        return {
+            "inversion_cerrada": inv_objetivo,
+            "valor_venta_origen": valor_venta_origen,
+            "moneda_origen": inv_objetivo.moneda,
+            "monto_acreditado": monto_acreditado,
+            "moneda_destino": moneda_destino,
+            "cuenta_destino": cuenta_obj,
+            "ganancia_neta_origen": ganancia_neta,
+            "movimiento": movimiento_creado,
+        }
 
     def eliminar_inversion(self, id_inversion: int) -> bool:
         if self._cache_inversiones_bd is not None:
@@ -2165,9 +2418,13 @@ class GestorFinanciero:
             raise ErrorValidacion("El nombre de la cuenta no puede superar 60 caracteres.")
         return limpio
 
-    def _validar_saldo_inicial(self, saldo_texto: str) -> Decimal:
+    def _validar_saldo_inicial(self, saldo_texto: Optional[str] = "0") -> Decimal:
+        if saldo_texto is None:
+            return Decimal("0")
+        if isinstance(saldo_texto, (int, float, Decimal)):
+            saldo_texto = str(saldo_texto)
         if not isinstance(saldo_texto, str) or not saldo_texto.strip():
-            raise ErrorValidacion("El saldo inicial es obligatorio.")
+            return Decimal("0")
         limpio = saldo_texto.strip()
         if not PATRON_VALOR.match(limpio):
             raise ErrorValidacion("El saldo inicial debe ser un número válido mayor o igual a cero.")

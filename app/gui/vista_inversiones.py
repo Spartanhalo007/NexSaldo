@@ -1987,6 +1987,89 @@ class VistaInversiones(ctk.CTkFrame):
                     text_color=col_p,
                 )
 
+    def _abrir_dialogo_cerrar_inversion(
+        self, val_op: ValoracionInversion, simbolo_grupo: Optional[str] = None
+    ):
+        inv = val_op.inversion
+        if inv.id is None:
+            return
+
+        def _al_vender(resultado: Dict[str, object]) -> None:
+            id_inv = inv.id
+            info_fila = self._widgets_filas_operacion.pop(id_inv, None) if id_inv is not None else None
+            if info_fila is not None:
+                try:
+                    info_fila["fila_op"].destroy()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
+            moneda = self._moneda_vista
+            try:
+                resumen = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=self._incluir_todas_convertidas,
+                    forzar_actualizacion=False,
+                    permitir_red=False,
+                )
+            except TypeError:
+                resumen = self._gestor.valorar_portafolio(
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=self._incluir_todas_convertidas,
+                    forzar_actualizacion=False,
+                )
+
+            posiciones: List[ValoracionInversion] = resumen["posiciones"]  # type: ignore[assignment]
+            grupos_por_simbolo: Dict[str, List[ValoracionInversion]] = {}
+            for val in posiciones:
+                grupos_por_simbolo.setdefault(val.inversion.simbolo, []).append(val)
+
+            sim_verificar = simbolo_grupo or (str(info_fila["simbolo"]) if info_fila else "")
+            if sim_verificar and sim_verificar not in grupos_por_simbolo:
+                w_grp = self._widgets_grupos_simbolo.pop(sim_verificar, None)
+                if w_grp is not None:
+                    try:
+                        w_grp["marco_grupo"].destroy()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                if self._simbolo_grafica == sim_verificar:
+                    self._simbolo_grafica = None
+
+            self._firma_estructura_posiciones = (
+                moneda,
+                self._simbolo_grafica,
+                tuple(
+                    (sim, tuple(v.inversion.id for v in vals))
+                    for sim, vals in grupos_por_simbolo.items()
+                ),
+            )
+            self._actualizar_encabezado_kpi(resumen, moneda)
+            if not posiciones:
+                self._renderizar_lista_posiciones([], moneda)
+            else:
+                self._actualizar_textos_posiciones_in_place(grupos_por_simbolo, moneda)
+
+            try:
+                curva = self._gestor.obtener_serie_montana_portafolio(
+                    marco_tiempo=self._marco_tiempo,
+                    simbolo_filtro=self._simbolo_grafica,
+                    moneda_objetivo=moneda,
+                    incluir_todas_convertidas=self._incluir_todas_convertidas,
+                    valoracion_precalculada=resumen,
+                    forzar_actualizacion=False,
+                    permitir_red=False,
+                )
+                self._dibujar_grafica_montana(curva)
+            except TypeError:
+                self._cargar_curva_montana_asincrona(resumen_precalculado=resumen)
+
+        DialogoCerrarInversion(
+            self,
+            gestor=self._gestor,
+            valoracion=val_op,
+            moneda_vista=self._moneda_vista,
+            al_confirmar=_al_vender,
+        )
+
     def _confirmar_eliminar_inversion(
         self, id_inversion: Optional[int], simbolo_grupo: Optional[str] = None
     ):
@@ -2082,3 +2165,266 @@ def _abreviar_cifra(valor: Decimal) -> str:
     if v >= 10_000:
         return f"{v / 1_000:.1f}k"
     return f"{v:,.0f}"
+
+
+class DialogoCerrarInversion(ctk.CTkToplevel):
+    """Modal para vender/cerrar una posición de inversión y acreditar los fondos en una cuenta."""
+
+    def __init__(
+        self,
+        master,
+        gestor,
+        valoracion: ValoracionInversion,
+        moneda_vista: str = "COP",
+        al_confirmar: Optional[Callable[[Dict[str, object]], None]] = None,
+    ):
+        super().__init__(master)
+        self._gestor = gestor
+        self._val = valoracion
+        self._inv = valoracion.inversion
+        self._moneda_vista = moneda_vista
+        self._al_confirmar = al_confirmar
+
+        self.title(f"Vender / Cerrar posición — {self._inv.simbolo}")
+        self.geometry("480x440")
+        self.resizable(False, False)
+        self.configure(fg_color=COLORES["fondo_principal"])
+        self.transient(master)
+        self.grab_set()
+
+        # Detectar broker sugerido desde las notas de la inversión (por defecto eToro)
+        broker_sugerido = "eToro"
+        notas_low = (self._inv.notas or "").lower()
+        for cand_key, cand_nom in (
+            ("binance", "Binance"),
+            ("interactive brokers", "Interactive Brokers"),
+            ("ibkr", "Interactive Brokers"),
+            ("trii", "Trii"),
+            ("hapi", "Hapi"),
+            ("etoro", "eToro"),
+        ):
+            if cand_key in notas_low:
+                broker_sugerido = cand_nom
+                break
+
+        try:
+            self._gestor.asegurar_cuenta_broker(broker_sugerido, moneda=self._inv.moneda)
+        except Exception:
+            pass
+
+        self._cuentas_disponibles = []
+        try:
+            self._cuentas_disponibles = list(self._gestor.obtener_cuentas())
+        except Exception:
+            self._cuentas_disponibles = []
+
+        self._mapa_opciones_cuenta: Dict[str, Optional[int]] = {}
+        opciones_menu: List[str] = []
+        opcion_predeterminada: Optional[str] = None
+
+        for cuenta_obj, saldo_actual in self._cuentas_disponibles:
+            etiqueta = f"{cuenta_obj.nombre} ({cuenta_obj.moneda}) — Saldo: {formatear_valor(saldo_actual, cuenta_obj.moneda)}"
+            self._mapa_opciones_cuenta[etiqueta] = cuenta_obj.id
+            opciones_menu.append(etiqueta)
+            if cuenta_obj.nombre.strip().lower() == broker_sugerido.lower():
+                opcion_predeterminada = etiqueta
+
+        etiqueta_ninguna = "No enviar a ninguna cuenta (solo cerrar posición)"
+        self._mapa_opciones_cuenta[etiqueta_ninguna] = None
+        opciones_menu.append(etiqueta_ninguna)
+        if opcion_predeterminada is None and opciones_menu:
+            opcion_predeterminada = opciones_menu[0]
+
+        # Valor de venta actual en la moneda nativa de la inversión
+        if (
+            getattr(valoracion, "precio_mercado_actual", None) is not None
+            and valoracion.precio_mercado_actual > Decimal("0")
+            and self._inv.cantidad_titulos > Decimal("0")
+        ):
+            self._valor_mercado_nativo = (
+                self._inv.cantidad_titulos * valoracion.precio_mercado_actual
+            ).quantize(Decimal("0.01"))
+        else:
+            self._valor_mercado_nativo = self._inv.monto_invertido.quantize(Decimal("0.01"))
+
+        pnl_nativo = self._valor_mercado_nativo - self._inv.monto_invertido
+        signo_pnl = "+" if pnl_nativo >= Decimal("0") else "-"
+        color_pnl = COLORES["exito"] if pnl_nativo >= Decimal("0") else COLORES["error"]
+
+        marco = ctk.CTkFrame(self, fg_color=COLORES["fondo_tarjeta"], corner_radius=12)
+        marco.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            marco,
+            text=f"💰 Vender posición: {self._inv.simbolo}",
+            font=(FUENTE, 16, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+
+        ctk.CTkLabel(
+            marco,
+            text=(
+                f"{self._inv.nombre}  •  {self._inv.cantidad_titulos.quantize(Decimal('0.0001'))} títulos\n"
+                f"Invertido originalmente: {formatear_valor(self._inv.monto_invertido, self._inv.moneda)}"
+            ),
+            font=(FUENTE, 12),
+            text_color=COLORES["texto_secundario"],
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(
+            marco,
+            text=(
+                f"Valor actual de mercado: {formatear_valor(self._valor_mercado_nativo, self._inv.moneda)} "
+                f"({signo_pnl}{formatear_valor(abs(pnl_nativo), self._inv.moneda)})"
+            ),
+            font=(FUENTE, 13, "bold"),
+            text_color=color_pnl,
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
+        ctk.CTkLabel(
+            marco,
+            text=f"Valor total de venta ({self._inv.moneda}):",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(anchor="w", padx=16, pady=(4, 2))
+
+        self._campo_valor_venta = ctk.CTkEntry(
+            marco,
+            height=34,
+            fg_color=COLORES["campo_fondo"],
+            text_color=COLORES["campo_texto"],
+            font=(FUENTE, 12),
+        )
+        self._campo_valor_venta.pack(fill="x", padx=16, pady=(0, 10))
+        self._campo_valor_venta.insert(0, f"{self._valor_mercado_nativo:.2f}")
+        self._campo_valor_venta.bind("<KeyRelease>", lambda _e: self._actualizar_preview_conversion())
+
+        ctk.CTkLabel(
+            marco,
+            text="Enviar fondos de la venta a la cuenta:",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["texto"],
+        ).pack(anchor="w", padx=16, pady=(4, 2))
+
+        self._selector_cuenta = ctk.CTkOptionMenu(
+            marco,
+            values=opciones_menu,
+            height=34,
+            fg_color=COLORES["boton_lateral"],
+            button_color=COLORES["acento"],
+            button_hover_color=COLORES["acento_hover"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12),
+            command=lambda _val: self._actualizar_preview_conversion(),
+        )
+        self._selector_cuenta.pack(fill="x", padx=16, pady=(0, 8))
+        if opcion_predeterminada:
+            self._selector_cuenta.set(opcion_predeterminada)
+
+        self._lbl_preview = ctk.CTkLabel(
+            marco,
+            text="",
+            font=(FUENTE, 12, "bold"),
+            text_color=COLORES["acento"],
+        )
+        self._lbl_preview.pack(anchor="w", padx=16, pady=(2, 12))
+
+        fila_botones = ctk.CTkFrame(marco, fg_color="transparent")
+        fila_botones.pack(fill="x", padx=16, pady=(8, 14))
+
+        ctk.CTkButton(
+            fila_botones,
+            text="Cancelar",
+            width=120,
+            height=34,
+            corner_radius=8,
+            fg_color=COLORES["boton_lateral"],
+            hover_color=COLORES["hover_lateral"],
+            text_color=COLORES["texto"],
+            font=(FUENTE, 12, "bold"),
+            command=self.destroy,
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            fila_botones,
+            text="Confirmar venta",
+            width=150,
+            height=34,
+            corner_radius=8,
+            fg_color=COLORES["exito"],
+            hover_color=COLORES["acento_hover"],
+            text_color="#FFFFFF",
+            font=(FUENTE, 12, "bold"),
+            command=self._confirmar,
+        ).pack(side="right")
+
+        self._actualizar_preview_conversion()
+
+    def _obtener_monto_ingresado(self) -> Decimal:
+        texto = (self._campo_valor_venta.get() or "").strip().replace(",", ".")
+        try:
+            val = Decimal(texto)
+            if val > Decimal("0"):
+                return val.quantize(Decimal("0.01"))
+        except Exception:
+            pass
+        return self._valor_mercado_nativo
+
+    def _actualizar_preview_conversion(self) -> None:
+        monto_origen = self._obtener_monto_ingresado()
+        seleccion = self._selector_cuenta.get()
+        id_cuenta = self._mapa_opciones_cuenta.get(seleccion)
+        if id_cuenta is None:
+            self._lbl_preview.configure(
+                text="La posición se cerrará sin acreditar fondos en ninguna cuenta."
+            )
+            return
+
+        cuenta_dest = None
+        for c_obj, _s in self._cuentas_disponibles:
+            if c_obj.id == id_cuenta:
+                cuenta_dest = c_obj
+                break
+        if cuenta_dest is None:
+            return
+
+        if cuenta_dest.moneda != self._inv.moneda:
+            try:
+                convertido = self._gestor.convertir_entre_monedas(
+                    monto_origen, self._inv.moneda, cuenta_dest.moneda
+                )
+                self._lbl_preview.configure(
+                    text=f"Se acreditarán: {formatear_valor(convertido, cuenta_dest.moneda)} en '{cuenta_dest.nombre}'"
+                )
+                return
+            except Exception:
+                pass
+
+        self._lbl_preview.configure(
+            text=f"Se acreditarán: {formatear_valor(monto_origen, cuenta_dest.moneda)} en '{cuenta_dest.nombre}'"
+        )
+
+    def _confirmar(self) -> None:
+        if self._inv.id is None:
+            self.destroy()
+            return
+        monto_origen = self._obtener_monto_ingresado()
+        seleccion = self._selector_cuenta.get()
+        id_cuenta = self._mapa_opciones_cuenta.get(seleccion)
+        destino_param = id_cuenta if id_cuenta is not None else "No enviar a ninguna cuenta"
+
+        try:
+            resultado = self._gestor.cerrar_inversion(
+                id_inversion=self._inv.id,
+                cuenta_destino=destino_param,
+                valor_total_venta=f"{monto_origen:.2f}",
+            )
+        except Exception as error:
+            messagebox.showerror("Error al cerrar posición", str(error), parent=self)
+            return
+
+        self.destroy()
+        if self._al_confirmar is not None:
+            self._al_confirmar(resultado)
+

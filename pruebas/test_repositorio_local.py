@@ -149,7 +149,7 @@ def test_resumen_mensual_agrupa_por_tipo_moneda_y_categoria():
         assert fila_gastos[0][3] == Decimal("10000")
 
         fila_alimentacion = [f for f in filas
-                            if f[2] == "Alimentación"]
+                             if f[2] == "Alimentación"]
         assert len(fila_alimentacion) == 1
         assert fila_alimentacion[0][3] == Decimal("5000")
     finally:
@@ -157,9 +157,9 @@ def test_resumen_mensual_agrupa_por_tipo_moneda_y_categoria():
         repositorio.eliminar_movimiento(segundo.id)
 
 
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Cuentas y transferencias (módulo Cuentas)
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def _cuenta_ficticia(**extras):
     """Crea una cuenta claramente ficticia para las pruebas."""
@@ -189,7 +189,7 @@ def _limpiar_cuentas_ficticias(repositorio):
                     (id_cuenta, id_cuenta),
                 )
                 cursor.execute("DELETE FROM cuenta WHERE id = %s",
-                               (id_cuenta,))
+                    (id_cuenta,))
 
 
 def test_insertar_y_consultar_cuenta_con_saldo():
@@ -237,12 +237,14 @@ def test_transferencia_actualiza_saldos_y_se_filtra_por_fecha():
         # Filtro por fecha: solo la del 3 de noviembre.
         del_dia = repositorio.obtener_transferencias(
             date(2026, 11, 3), date(2026, 11, 3))
+        del_dia = [t for t in del_dia if t[2] == "Ficticia origen" and t[3] == "Ficticia destino"]
         assert len(del_dia) == 1
         assert del_dia[0][2] == "Ficticia origen"
         assert del_dia[0][3] == "Ficticia destino"
 
         fuera_de_fecha = repositorio.obtener_transferencias(
             date(2026, 11, 10), date(2026, 11, 30))
+        fuera_de_fecha = [t for t in fuera_de_fecha if t[2] == "Ficticia origen" and t[3] == "Ficticia destino"]
         assert fuera_de_fecha == []
     finally:
         _limpiar_cuentas_ficticias(repositorio)
