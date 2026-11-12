@@ -14,6 +14,7 @@ from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
 from app.gui.vista_gastos import VistaGastos
 from app.gui.vista_ingresos import VistaIngresos
 from app.gui.vista_inversiones import VistaInversiones
+from app.gui.vista_reportes import VistaReportes
 from app.gui.vista_resumen import VistaResumen
 
 RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
@@ -24,14 +25,13 @@ NAVEGACION = [
     ("Gastos", "gastos"),
     ("Ingresos", "ingresos"),
     ("Inversiones", "inversiones"),
-    ("Reportes", "pendiente"),
+    ("Reportes", "reportes"),
     ("Categorías", "pendiente"),
     ("Configuración", "pendiente"),
     ("Modo Oscuro", "tema"),
 ]
 
 MODULOS_PENDIENTES = {
-    "Reportes": "Análisis y gráficos detallados en desarrollo.",
     "Categorías": "Gestión de categorías personalizadas en desarrollo.",
     "Configuración": "Ajustes y exportación de datos en desarrollo.",
 }
@@ -198,6 +198,8 @@ class VentanaPrincipal(ctk.CTk):
             self._mostrar_ingresos()
         elif modulo == "inversiones":
             self._mostrar_inversiones()
+        elif modulo == "reportes":
+            self._mostrar_reportes()
         elif modulo == "movimientos":
             filtro = "GASTO" if texto == "Gastos" else "INGRESO"
             self._mostrar_movimientos(filtro_tipo=filtro, titulo=texto)
@@ -233,6 +235,11 @@ class VentanaPrincipal(ctk.CTk):
     def _mostrar_inversiones(self):
         self._activar_vista_cacheada(
             "inversiones", lambda: VistaInversiones(self._area, self._gestor)
+        )
+
+    def _mostrar_reportes(self):
+        self._activar_vista_cacheada(
+            "reportes", lambda: VistaReportes(self._area, self._gestor)
         )
 
     def _mostrar_movimientos(self, filtro_tipo, titulo):

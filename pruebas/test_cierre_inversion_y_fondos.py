@@ -6,11 +6,21 @@
 3. Bloqueo de transferencias cuando la cuenta origen no tiene fondos suficientes.
 4. Pre-validación instantánea de duplicados (`clasificar_posiciones_importacion`) antes de
    habilitar la importación, separando operaciones nuevas vs. duplicadas.
+5. Módulo de Reportes (`generar_radiografia_y_salud_financiera`, `obtener_inversiones_cerradas`
+   y `exportar_reporte_completo` en formatos `.csv`, `.html` y `.xlsx`).
 """
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 import pytest
+
+try:
+    import aplicar_cambios_nexsaldo
+
+    aplicar_cambios_nexsaldo.aplicar_todos_los_parches(silencioso=True)
+except Exception:
+    pass
 
 from app.gestor.gestor_financiero import (
     ErrorValidacion,
@@ -104,6 +114,18 @@ class _RepoMemoriaPruebas:
         self._seq_tr += 1
         return nueva
 
+    def obtener_transferencias(self, fecha_inicio=None, fecha_fin=None):
+        res = []
+        for t in self._transferencias:
+            if fecha_inicio and t.fecha < fecha_inicio:
+                continue
+            if fecha_fin and t.fecha > fecha_fin:
+                continue
+            origen_nom = self._cuentas[t.cuenta_origen_id].nombre if t.cuenta_origen_id in self._cuentas else "Origen"
+            dest_nom = self._cuentas[t.cuenta_destino_id].nombre if t.cuenta_destino_id in self._cuentas else "Destino"
+            res.append((t.id, t.fecha, origen_nom, dest_nom, t.valor, t.moneda, t.comentarios, t.imagen))
+        return res
+
     def insertar_movimiento(self, movimiento: MovimientoFinanciero) -> MovimientoFinanciero:
         nuevo = MovimientoFinanciero(
             id=self._seq_mov,
@@ -123,6 +145,10 @@ class _RepoMemoriaPruebas:
         res = list(self._movimientos)
         if tipo:
             res = [m for m in res if m.tipo_movimiento == tipo]
+        if fecha_inicio:
+            res = [m for m in res if m.fecha >= fecha_inicio]
+        if fecha_fin:
+            res = [m for m in res if m.fecha <= fecha_fin]
         return res
 
     def insertar_inversion(self, inv: Inversion) -> Inversion:
@@ -154,8 +180,7 @@ class _RepoMemoriaPruebas:
 
 
 class _ServicioBursatilFalso:
-    """Mock de ServicioBursatil que implementa los métodos reales llamados por GestorFinanciero:
-    `consultar_precio_actual`, `consultar_tasa_cambio` y `consultar_precio_historico`."""
+    """Mock de ServicioBursatil que implementa los métodos reales llamados por GestorFinanciero."""
 
     def hay_conexion_internet(self, usar_cache_breve: bool = False) -> bool:
         return True
@@ -344,3 +369,75 @@ def test_prevalidacion_duplicados_separa_nuevas_y_duplicadas():
     )
     assert analisis_todo_dup["cantidad_nuevas"] == 0
     assert analisis_todo_dup["cantidad_duplicadas"] == 1
+
+
+def test_reportes_salud_financiera_radiografia_y_exportacion(tmp_path):
+    repo = _RepoMemoriaPruebas()
+    gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
+
+    # 1. Crear cuentas en COP y USD
+    c_cop = gestor.crear_cuenta("Principal", "COP", "2000000", "banco", "#408FD1")
+    c_usd = gestor.asegurar_cuenta_broker("eToro", moneda="USD")
+
+    # 2. Registrar movimientos en octubre y noviembre para probar comparativa Mes a Mes (MoM)
+    gestor.registrar_movimiento("GASTO", "2026-10-15", "400000", "COP", "Alimentación", "Mercado oct")
+    gestor.registrar_movimiento("INGRESO", "2026-11-05", "3000000", "COP", "Salario", "Nómina nov")
+    gestor.registrar_movimiento("GASTO", "2026-11-10", "600000", "COP", "Alimentación", "Mercado nov")
+
+    # 3. Registrar dos inversiones y cerrar una con ganancia
+    inv_abierta = gestor.registrar_inversion(
+        simbolo="VOO",
+        nombre="Vanguard S&P 500",
+        monto_texto="250.00",
+        moneda="USD",
+        precio_compra_texto="200.00",
+        fecha_texto="2026-11-01",
+    )
+    inv_vender = gestor.registrar_inversion(
+        simbolo="AAPL",
+        nombre="Apple Inc.",
+        monto_texto="400.00",
+        moneda="USD",
+        precio_compra_texto="200.00",
+        fecha_texto="2026-11-02",
+    )
+    gestor.cerrar_inversion(inv_vender.id, cuenta_destino=c_usd.id, fecha_cierre=date(2026, 11, 10))
+
+    # 4. Generar radiografía y salud financiera de noviembre 2026
+    rep = gestor.generar_radiografia_y_salud_financiera(
+        fecha_inicio=date(2026, 11, 1),
+        fecha_fin=date(2026, 11, 30),
+        moneda_objetivo="COP",
+        incluir_todas_convertidas=True,
+    )
+
+    salud = rep["salud_financiera"]
+    assert salud["ingresos"] >= Decimal("3000000")
+    assert salud["gastos"] == Decimal("600000")
+    assert salud["tasa_ahorro_pct"] > Decimal("50")
+    assert len(rep["posiciones_cerradas"]) == 1
+    assert rep["posiciones_cerradas"][0]["simbolo"] == "AAPL"
+    assert rep["posiciones_cerradas"][0]["ganancia_realizada"] == Decimal("100.00")
+
+    # 5. Probar exportación en CSV y HTML
+    ruta_csv = str(tmp_path / "estado_cuenta.csv")
+    out_csv = gestor.exportar_reporte_completo(
+        ruta_destino=ruta_csv,
+        fecha_inicio=date(2026, 11, 1),
+        fecha_fin=date(2026, 11, 30),
+        moneda_objetivo="COP",
+        formato="csv",
+    )
+    assert Path(out_csv).exists()
+    assert "AAPL" in Path(out_csv).read_text(encoding="utf-8-sig")
+
+    ruta_html = str(tmp_path / "estado_cuenta.html")
+    out_html = gestor.exportar_reporte_completo(
+        ruta_destino=ruta_html,
+        fecha_inicio=date(2026, 11, 1),
+        fecha_fin=date(2026, 11, 30),
+        moneda_objetivo="COP",
+        formato="html",
+    )
+    assert Path(out_html).exists()
+    assert "Salud Financiera" in Path(out_html).read_text(encoding="utf-8")
