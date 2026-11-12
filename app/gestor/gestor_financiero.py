@@ -1682,6 +1682,89 @@ class GestorFinanciero:
             pass
         return self.obtener_cuentas()
 
+    def clasificar_posiciones_importacion(
+        self,
+        posiciones: List[Dict[str, object]],
+        omitir_duplicados: bool = True,
+        limpiar_antes: bool = False,
+    ) -> Dict[str, object]:
+        """Pre-valida instantáneamente las operaciones de un archivo CSV/XLSX contra las
+        inversiones ya guardadas en la base de datos antes de importar.
+
+        Separa las operaciones en `nuevas` y `duplicadas` para que la interfaz muestre
+        el conteo real antes de habilitar el botón de confirmación.
+        """
+        if limpiar_antes or not omitir_duplicados:
+            todas = []
+            for p in posiciones:
+                copia = dict(p)
+                copia["es_duplicada"] = False
+                todas.append(copia)
+            return {
+                "total_detectadas": len(posiciones),
+                "nuevas": todas,
+                "duplicadas": [],
+                "cantidad_nuevas": len(todas),
+                "cantidad_duplicadas": 0,
+                "todas_marcadas": todas,
+            }
+
+        try:
+            existentes = self.listar_inversiones()
+        except Exception:
+            existentes = self.obtener_inversiones()
+
+        claves_existentes = set()
+        for inv in existentes:
+            claves_existentes.add(clave_duplicado_inversion(inv))
+            try:
+                claves_existentes.add(
+                    _clave_duplicado(
+                        normalizar_simbolo_yahoo(inv.simbolo),
+                        inv.fecha_compra,
+                        inv.monto_invertido,
+                    )
+                )
+            except Exception:
+                pass
+
+        nuevas: List[Dict[str, object]] = []
+        duplicadas: List[Dict[str, object]] = []
+        todas_marcadas: List[Dict[str, object]] = []
+        vistos_en_lote = set()
+
+        for pos in posiciones:
+            clave_raw = clave_duplicado_posicion(pos)
+            fecha_pos = pos.get("fecha_compra") or ""
+            fecha_iso = fecha_pos.isoformat() if hasattr(fecha_pos, "isoformat") else str(fecha_pos)
+            sim_norm = normalizar_simbolo_yahoo(str(pos.get("simbolo", "")))
+            clave_norm = _clave_duplicado(sim_norm, fecha_iso, pos.get("monto_invertido", 0))
+
+            copia = dict(pos)
+            if (
+                clave_raw in claves_existentes
+                or clave_norm in claves_existentes
+                or clave_raw in vistos_en_lote
+                or clave_norm in vistos_en_lote
+            ):
+                copia["es_duplicada"] = True
+                duplicadas.append(copia)
+            else:
+                copia["es_duplicada"] = False
+                vistos_en_lote.add(clave_raw)
+                vistos_en_lote.add(clave_norm)
+                nuevas.append(copia)
+            todas_marcadas.append(copia)
+
+        return {
+            "total_detectadas": len(posiciones),
+            "nuevas": nuevas,
+            "duplicadas": duplicadas,
+            "cantidad_nuevas": len(nuevas),
+            "cantidad_duplicadas": len(duplicadas),
+            "todas_marcadas": todas_marcadas,
+        }
+
     def _acreditar_saldo_cuenta_directo(self, cuenta_id: int, monto: Decimal) -> None:
         """Incrementa el saldo de la cuenta cuando el repositorio no enlaza movimientos a cuentas."""
         if monto <= Decimal("0"):
@@ -1725,7 +1808,6 @@ class GestorFinanciero:
         if inv_objetivo is None:
             raise ErrorValidacion(f"No se encontró la inversión con ID {id_inversion}.")
 
-        # 1. Determinar el valor total de venta en la moneda original de la inversión
         valor_venta_origen: Optional[Decimal] = None
         if valor_total_venta is not None and str(valor_total_venta).strip() != "":
             try:
@@ -1748,20 +1830,33 @@ class GestorFinanciero:
                 raise ErrorValidacion("El precio unitario de venta no es válido.") from exc
 
         if valor_venta_origen is None:
-            try:
-                cot = self.consultar_precio_inversion(
-                    inv_objetivo.simbolo,
-                    moneda_esperada=inv_objetivo.moneda,
-                    forzar_actualizacion=False,
-                    permitir_red=True,
-                )
-            except TypeError:
-                cot = self.consultar_precio_inversion(
-                    inv_objetivo.simbolo,
-                    moneda_esperada=inv_objetivo.moneda,
-                )
-            except Exception:
-                cot = None
+            cot = None
+            if hasattr(self._servicio_bursatil, "consultar_precio_actual"):
+                try:
+                    cot = self._servicio_bursatil.consultar_precio_actual(
+                        normalizar_simbolo_yahoo(inv_objetivo.simbolo),
+                        moneda_esperada=inv_objetivo.moneda,
+                    )
+                except Exception:
+                    cot = None
+            if cot is None and hasattr(self._servicio_bursatil, "obtener_cotizacion_activo"):
+                try:
+                    cot = self._servicio_bursatil.obtener_cotizacion_activo(
+                        normalizar_simbolo_yahoo(inv_objetivo.simbolo),
+                        moneda_esperada=inv_objetivo.moneda,
+                    )
+                except Exception:
+                    cot = None
+            if cot is None:
+                try:
+                    cot = self.consultar_precio_inversion(
+                        inv_objetivo.simbolo,
+                        moneda_esperada=inv_objetivo.moneda,
+                        forzar_actualizacion=False,
+                        permitir_red=True,
+                    )
+                except Exception:
+                    cot = None
 
             if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0") and inv_objetivo.cantidad_titulos > Decimal("0"):
                 valor_venta_origen = (inv_objetivo.cantidad_titulos * cot.precio).quantize(
@@ -1772,7 +1867,6 @@ class GestorFinanciero:
                     Decimal("0.01"), rounding=ROUND_HALF_UP
                 )
 
-        # 2. Resolver cuenta de destino
         cuenta_obj: Optional[Cuenta] = None
         if isinstance(cuenta_destino, Cuenta):
             cuenta_obj = cuenta_destino
@@ -1792,7 +1886,6 @@ class GestorFinanciero:
                         texto_dest, moneda=inv_objetivo.moneda
                     )
 
-        # 3. Convertir monto si la cuenta destino tiene otra divisa y acreditar saldo
         monto_acreditado = valor_venta_origen
         moneda_destino = inv_objetivo.moneda
         movimiento_creado: Optional[MovimientoFinanciero] = None
@@ -1801,16 +1894,35 @@ class GestorFinanciero:
         if cuenta_obj is not None:
             moneda_destino = cuenta_obj.moneda
             if moneda_destino != inv_objetivo.moneda:
+                convertido_ok = None
                 try:
-                    monto_acreditado = self.convertir_entre_monedas(
+                    convertido_ok = self.convertir_entre_monedas(
                         valor_venta_origen, inv_objetivo.moneda, moneda_destino
-                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    )
                 except Exception:
+                    convertido_ok = None
+
+                if convertido_ok is None:
+                    for nombre_metodo_tasa in ("consultar_tasa_cambio", "obtener_tasa_cambio"):
+                        if hasattr(self._servicio_bursatil, nombre_metodo_tasa):
+                            try:
+                                fn_tasa = getattr(self._servicio_bursatil, nombre_metodo_tasa)
+                                cot_tasa = fn_tasa(inv_objetivo.moneda, moneda_destino)
+                                if cot_tasa is not None and getattr(cot_tasa, "precio", Decimal("0")) > Decimal("0"):
+                                    convertido_ok = valor_venta_origen * cot_tasa.precio
+                                    break
+                            except Exception:
+                                pass
+
+                if convertido_ok is not None and convertido_ok > Decimal("0"):
+                    monto_acreditado = Decimal(str(convertido_ok)).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                else:
                     monto_acreditado = valor_venta_origen
 
             saldo_antes = self.obtener_saldo_cuenta(cuenta_obj.id)
 
-            # Intentar registrar movimiento de ingreso para trazabilidad
             try:
                 cats_ingreso = []
                 if hasattr(self._repositorio, "obtener_categorias"):
@@ -1850,7 +1962,6 @@ class GestorFinanciero:
             if saldo_despues < saldo_antes + monto_acreditado:
                 self._acreditar_saldo_cuenta_directo(cuenta_obj.id, monto_acreditado)
 
-        # 4. Eliminar la posición cerrada del portafolio activo
         self.eliminar_inversion(id_inversion)
 
         ganancia_neta = (valor_venta_origen - inv_objetivo.monto_invertido).quantize(

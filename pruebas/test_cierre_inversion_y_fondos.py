@@ -4,18 +4,13 @@
    cierre/venta de posiciones (`cerrar_inversion`) acreditando fondos en la cuenta elegida
    (incluyendo conversión de divisa USD -> COP cuando la cuenta destino está en COP).
 3. Bloqueo de transferencias cuando la cuenta origen no tiene fondos suficientes.
+4. Pre-validación instantánea de duplicados (`clasificar_posiciones_importacion`) antes de
+   habilitar la importación, separando operaciones nuevas vs. duplicadas.
 """
 
 from datetime import date
 from decimal import Decimal
 import pytest
-
-try:
-    import aplicar_cambios_nexsaldo
-
-    aplicar_cambios_nexsaldo.aplicar_todos_los_parches(silencioso=True)
-except Exception:
-    pass
 
 from app.gestor.gestor_financiero import (
     ErrorValidacion,
@@ -149,6 +144,9 @@ class _RepoMemoriaPruebas:
     def obtener_inversiones(self):
         return list(self._inversiones)
 
+    def obtener_todas_las_inversiones(self):
+        return list(self._inversiones)
+
     def eliminar_inversion(self, id_inversion: int) -> bool:
         antes = len(self._inversiones)
         self._inversiones = [i for i in self._inversiones if i.id != id_inversion]
@@ -156,10 +154,13 @@ class _RepoMemoriaPruebas:
 
 
 class _ServicioBursatilFalso:
+    """Mock de ServicioBursatil que implementa los métodos reales llamados por GestorFinanciero:
+    `consultar_precio_actual`, `consultar_tasa_cambio` y `consultar_precio_historico`."""
+
     def hay_conexion_internet(self, usar_cache_breve: bool = False) -> bool:
         return True
 
-    def obtener_tasa_cambio(self, origen: str, destino: str) -> Cotizacion:
+    def consultar_tasa_cambio(self, origen: str, destino: str) -> Cotizacion:
         if origen == "USD" and destino == "COP":
             return Cotizacion(
                 id=None,
@@ -178,7 +179,10 @@ class _ServicioBursatilFalso:
             fuente="Test",
         )
 
-    def obtener_cotizacion_activo(self, simbolo: str, moneda_esperada: str = "USD") -> Cotizacion:
+    def obtener_tasa_cambio(self, origen: str, destino: str) -> Cotizacion:
+        return self.consultar_tasa_cambio(origen, destino)
+
+    def consultar_precio_actual(self, simbolo: str, moneda_esperada: str = "USD") -> Cotizacion:
         return Cotizacion(
             id=None,
             simbolo=simbolo,
@@ -187,6 +191,12 @@ class _ServicioBursatilFalso:
             moneda=moneda_esperada,
             fuente="Test",
         )
+
+    def obtener_cotizacion_activo(self, simbolo: str, moneda_esperada: str = "USD") -> Cotizacion:
+        return self.consultar_precio_actual(simbolo, moneda_esperada=moneda_esperada)
+
+    def consultar_precio_historico(self, simbolo: str, fecha_compra: date, moneda_esperada: str = "USD"):
+        return None
 
 
 def test_saldo_inicial_vacio_se_asume_como_cero():
@@ -219,7 +229,6 @@ def test_transferencia_bloqueada_cuando_no_hay_fondos_suficientes():
             fecha_texto="2026-11-03",
         )
 
-    # Una transferencia dentro del saldo disponible sí debe permitirse
     tr = gestor.crear_transferencia(
         cuenta_origen_id=origen.id,
         cuenta_destino_id=destino.id,
@@ -235,13 +244,11 @@ def test_asegurar_cuenta_broker_y_cerrar_inversion_acreditando_cuenta():
     repo = _RepoMemoriaPruebas()
     gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
 
-    # 1. Cuenta automática de eToro empieza en 0
     cuenta_etoro = gestor.asegurar_cuenta_broker("eToro", moneda="USD")
     assert cuenta_etoro.nombre == "eToro"
     assert cuenta_etoro.moneda == "USD"
     assert gestor.obtener_saldo_cuenta(cuenta_etoro.id) == Decimal("0")
 
-    # 2. Registrar una posición de 2 títulos de AAPL comprados a $200 USD ($400 USD invertidos)
     inv = gestor.registrar_inversion(
         simbolo="AAPL",
         nombre="Apple Inc.",
@@ -253,7 +260,6 @@ def test_asegurar_cuenta_broker_y_cerrar_inversion_acreditando_cuenta():
     )
     assert len(gestor.obtener_inversiones()) == 1
 
-    # 3. Cerrar la posición enviando fondos a eToro (precio actual en _ServicioBursatilFalso = $250 -> total $500 USD)
     resultado = gestor.cerrar_inversion(
         id_inversion=inv.id,
         cuenta_destino="eToro",
@@ -279,7 +285,6 @@ def test_cerrar_inversion_convierte_a_cop_si_cuenta_destino_es_cop():
         fecha_texto="2026-10-01",
     )
 
-    # 1 título vendido a $250 USD -> a tasa 4000 COP/USD = $1,000,000 COP acreditados en 'Principal'
     res = gestor.cerrar_inversion(
         id_inversion=inv.id,
         cuenta_destino=cuenta_principal.id,
@@ -288,3 +293,54 @@ def test_cerrar_inversion_convierte_a_cop_si_cuenta_destino_es_cop():
     assert res["moneda_destino"] == "COP"
     assert res["monto_acreditado"] == Decimal("1000000.00")
     assert gestor.obtener_saldo_cuenta(cuenta_principal.id) == Decimal("1100000.00")
+
+
+def test_prevalidacion_duplicados_separa_nuevas_y_duplicadas():
+    repo = _RepoMemoriaPruebas()
+    gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
+
+    gestor.registrar_inversion(
+        simbolo="VOO",
+        nombre="Vanguard S&P 500",
+        monto_texto="200.00",
+        moneda="USD",
+        precio_compra_texto="400.00",
+        fecha_texto="2026-01-10",
+    )
+
+    posiciones_csv = [
+        {
+            "simbolo": "VOO",
+            "nombre": "Vanguard S&P 500",
+            "monto_invertido": Decimal("200.00"),
+            "moneda": "USD",
+            "precio_compra": Decimal("400.00"),
+            "unidades": Decimal("0.5"),
+            "fecha_compra": date(2026, 1, 10),
+            "notas": "Importado de eToro",
+        },
+        {
+            "simbolo": "NVDA",
+            "nombre": "NVIDIA Corp",
+            "monto_invertido": Decimal("150.00"),
+            "moneda": "USD",
+            "precio_compra": Decimal("150.00"),
+            "unidades": Decimal("1.0"),
+            "fecha_compra": date(2026, 2, 15),
+            "notas": "Importado de eToro",
+        },
+    ]
+
+    analisis = gestor.clasificar_posiciones_importacion(
+        posiciones_csv, omitir_duplicados=True, limpiar_antes=False
+    )
+    assert analisis["cantidad_duplicadas"] == 1
+    assert analisis["cantidad_nuevas"] == 1
+    assert analisis["nuevas"][0]["simbolo"] == "NVDA"
+    assert analisis["duplicadas"][0]["simbolo"] == "VOO"
+
+    analisis_todo_dup = gestor.clasificar_posiciones_importacion(
+        [posiciones_csv[0]], omitir_duplicados=True, limpiar_antes=False
+    )
+    assert analisis_todo_dup["cantidad_nuevas"] == 0
+    assert analisis_todo_dup["cantidad_duplicadas"] == 1
