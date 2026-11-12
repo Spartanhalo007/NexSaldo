@@ -711,13 +711,18 @@ class DialogoImportarBroker(ctk.CTkToplevel):
         self._btn_confirmar.pack(side="right")
 
     def _al_cambiar_reemplazo(self):
-        """Reemplazar e 'importar solo nuevas' son excluyentes."""
+        """Reemplazar e 'importar solo nuevas' son excluyentes; recalcula la vista previa al instante."""
         if self._var_reemplazar.get():
             self._var_sin_duplicados.set(False)
+        if self._ruta_seleccionada:
+            self._recargar_previsualizacion()
 
     def _al_cambiar_sin_duplicados(self):
+        """Al activar o desactivar 'Importar solo nuevas', recalcula duplicados antes de importar."""
         if self._var_sin_duplicados.get():
             self._var_reemplazar.set(False)
+        if self._ruta_seleccionada:
+            self._recargar_previsualizacion()
 
     def _seleccionar_archivo(self):
         ruta = filedialog.askopenfilename(
@@ -739,15 +744,26 @@ class DialogoImportarBroker(ctk.CTkToplevel):
     def _recargar_previsualizacion(self):
         if not self._ruta_seleccionada:
             return
-        for hijo in self._lista_preview.winfo_children():
-            hijo.destroy()
+
+        for child in self._lista_preview.winfo_children():
+            child.destroy()
 
         try:
-            posiciones = self._gestor.previsualizar_importacion_broker(
-                self._ruta_seleccionada,
-                broker=self._broker,
-                agrupar_por_ticker=bool(self._var_agrupar.get()),
-            )
+            agrupar = bool(self._var_agrupar.get())
+            if hasattr(self._gestor, "previsualizar_importacion_broker"):
+                posiciones = self._gestor.previsualizar_importacion_broker(
+                    self._ruta_seleccionada,
+                    self._broker,
+                    agrupar_por_ticker=agrupar,
+                )
+            else:
+                from app.servicio.importadores import parsear_archivo_broker
+
+                posiciones = parsear_archivo_broker(
+                    self._ruta_seleccionada,
+                    self._broker,
+                    agrupar_por_ticker=agrupar,
+                )
         except Exception as error:
             self._posiciones_detectadas = []
             self._etiqueta_estado.configure(
@@ -764,26 +780,98 @@ class DialogoImportarBroker(ctk.CTkToplevel):
                      f"de {self._config['nombre']} con las columnas esperadas (o usa la plantilla CSV).",
                 text_color=COLORES["error"],
             )
-            self._btn_confirmar.configure(state="disabled", text="✅ Importar al portafolio")
+            self._btn_confirmar.configure(state="disabled", text="✅ Importar 0 operaciones")
             return
 
-        total_usd = sum((p["monto_invertido"] for p in posiciones), Decimal("0"))
-        tickers_unicos = len({str(p["simbolo"]) for p in posiciones})
-        self._etiqueta_estado.configure(
-            text=(
-                f"✅ {len(posiciones)} operaciones ABIERTAS detectadas en {tickers_unicos} activos "
-                f"(cerradas excluidas)  •  Total invertido: {formatear_valor(total_usd, 'USD')}"
-            ),
-            text_color=COLORES["exito"],
-        )
-        self._btn_confirmar.configure(
-            state="normal",
-            text=f"✅ Importar {len(posiciones)} operaciones abiertas",
-        )
+        limpiar_antes = bool(self._var_reemplazar.get())
+        omitir_duplicados = bool(self._var_sin_duplicados.get())
 
-        for pos in posiciones:
+        # Pre-validación instantánea contra la base de datos antes de importar
+        if hasattr(self._gestor, "clasificar_posiciones_importacion"):
+            analisis = self._gestor.clasificar_posiciones_importacion(
+                posiciones,
+                omitir_duplicados=omitir_duplicados,
+                limpiar_antes=limpiar_antes,
+            )
+        else:
+            analisis = {
+                "total_detectadas": len(posiciones),
+                "nuevas": list(posiciones),
+                "duplicadas": [],
+                "cantidad_nuevas": len(posiciones),
+                "cantidad_duplicadas": 0,
+                "todas_marcadas": [dict(p, es_duplicada=False) for p in posiciones],
+            }
+
+        posiciones_nuevas: List[Dict[str, object]] = analisis["nuevas"]  # type: ignore[assignment]
+        posiciones_duplicadas: List[Dict[str, object]] = analisis["duplicadas"]  # type: ignore[assignment]
+        cant_nuevas = int(analisis["cantidad_nuevas"])  # type: ignore[arg-type]
+        cant_duplicadas = int(analisis["cantidad_duplicadas"])  # type: ignore[arg-type]
+
+        if omitir_duplicados and not limpiar_antes:
+            if cant_nuevas == 0:
+                self._etiqueta_estado.configure(
+                    text=(
+                        f"⚠️ {cant_duplicadas} operaciones están duplicadas y no se importarán. "
+                        "0 operaciones nuevas."
+                    ),
+                    text_color=COLORES["error"],
+                )
+                self._btn_confirmar.configure(
+                    state="disabled",
+                    text="✅ Importar 0 operaciones",
+                )
+            elif cant_duplicadas > 0:
+                total_nuevas_usd = sum(
+                    (p["monto_invertido"] for p in posiciones_nuevas), Decimal("0")
+                )
+                self._etiqueta_estado.configure(
+                    text=(
+                        f"✅ {cant_nuevas} operaciones nuevas listas para importar "
+                        f"({formatear_valor(total_nuevas_usd, 'USD')}) • "
+                        f"{cant_duplicadas} operaciones están duplicadas y no se importarán."
+                    ),
+                    text_color=COLORES["exito"],
+                )
+                self._btn_confirmar.configure(
+                    state="normal",
+                    text=f"✅ Importar {cant_nuevas} operaciones nuevas",
+                )
+            else:
+                total_nuevas_usd = sum(
+                    (p["monto_invertido"] for p in posiciones_nuevas), Decimal("0")
+                )
+                self._etiqueta_estado.configure(
+                    text=(
+                        f"✅ {cant_nuevas} operaciones nuevas listas para importar "
+                        f"({formatear_valor(total_nuevas_usd, 'USD')}) • 0 operaciones duplicadas."
+                    ),
+                    text_color=COLORES["exito"],
+                )
+                self._btn_confirmar.configure(
+                    state="normal",
+                    text=f"✅ Importar {cant_nuevas} operaciones nuevas",
+                )
+        else:
+            total_usd = sum((p["monto_invertido"] for p in posiciones), Decimal("0"))
+            tickers_unicos = len({str(p["simbolo"]) for p in posiciones})
+            self._etiqueta_estado.configure(
+                text=(
+                    f"✅ {len(posiciones)} operaciones abiertas detectadas en {tickers_unicos} activos "
+                    f"• Total invertido: {formatear_valor(total_usd, 'USD')}"
+                ),
+                text_color=COLORES["exito"],
+            )
+            self._btn_confirmar.configure(
+                state="normal",
+                text=f"✅ Importar {len(posiciones)} operaciones",
+            )
+
+        def _renderizar_fila_preview(pos: Dict[str, object], es_duplicada: bool) -> None:
             fila = ctk.CTkFrame(
-                self._lista_preview, fg_color=COLORES["boton_lateral"], corner_radius=8
+                self._lista_preview,
+                fg_color=COLORES["fondo_principal"] if es_duplicada else COLORES["boton_lateral"],
+                corner_radius=8,
             )
             fila.pack(fill="x", padx=6, pady=3)
 
@@ -796,16 +884,20 @@ class DialogoImportarBroker(ctk.CTkToplevel):
             fecha_c = pos.get("fecha_compra")
             fecha_txt = fecha_c.isoformat() if hasattr(fecha_c, "isoformat") else str(fecha_c or "")
 
+            etiqueta_estado_fila = "[DUPLICADA — No se importará] " if es_duplicada else "[NUEVA] "
+            color_izq = COLORES["texto_secundario"] if es_duplicada else COLORES["acento"]
+            color_der = COLORES["texto_secundario"] if es_duplicada else COLORES["texto"]
+
             ctk.CTkLabel(
                 fila,
-                text=f"{sim}  •  {nom[:22]}  ({fecha_txt})",
+                text=f"{etiqueta_estado_fila if (omitir_duplicados and not limpiar_antes) else ''}{sim} • {nom[:22]} ({fecha_txt})",
                 font=(FUENTE, 12, "bold"),
-                text_color=COLORES["acento"],
+                text_color=color_izq,
             ).pack(side="left", padx=10, pady=6)
 
             det_txt = f"Invertido: {formatear_valor(monto, mon)}"
             if unidades is not None:
-                det_txt += f"  |  {Decimal(str(unidades)).quantize(Decimal('0.0001'))} títulos"
+                det_txt += f" | {Decimal(str(unidades)).quantize(Decimal('0.0001'))} titulos"
             if precio_c is not None:
                 det_txt += f" @ {formatear_valor(Decimal(str(precio_c)), mon)}"
 
@@ -813,8 +905,32 @@ class DialogoImportarBroker(ctk.CTkToplevel):
                 fila,
                 text=det_txt,
                 font=(FUENTE, 11, "bold"),
-                text_color=COLORES["texto"],
+                text_color=color_der,
             ).pack(side="right", padx=10, pady=6)
+
+        if omitir_duplicados and not limpiar_antes:
+            if posiciones_nuevas:
+                ctk.CTkLabel(
+                    self._lista_preview,
+                    text=f"🟢 Operaciones nuevas que se importarán ({cant_nuevas}):",
+                    font=(FUENTE, 12, "bold"),
+                    text_color=COLORES["exito"],
+                ).pack(anchor="w", padx=8, pady=(4, 2))
+                for pos in posiciones_nuevas:
+                    _renderizar_fila_preview(pos, es_duplicada=False)
+
+            if posiciones_duplicadas:
+                ctk.CTkLabel(
+                    self._lista_preview,
+                    text=f"⚪ Operaciones duplicadas que no se importarán ({cant_duplicadas}):",
+                    font=(FUENTE, 12, "bold"),
+                    text_color=COLORES["texto_secundario"],
+                ).pack(anchor="w", padx=8, pady=(8, 2))
+                for pos in posiciones_duplicadas:
+                    _renderizar_fila_preview(pos, es_duplicada=True)
+        else:
+            for pos in posiciones:
+                _renderizar_fila_preview(pos, es_duplicada=False)
 
     def _descargar_plantilla(self):
         ruta = filedialog.asksaveasfilename(
@@ -873,13 +989,8 @@ class DialogoImportarBroker(ctk.CTkToplevel):
             self.grab_release()
         except Exception:
             pass
-        resumen = f"Se importaron {cantidad} posiciones al portafolio."
-        if omitidas:
-            resumen += f"\nSe omitieron {omitidas} duplicados (ya existían)."
         self.destroy()
         cb()
-        if omitidas:
-            messagebox.showinfo("Importación terminada", resumen)
 
     def _finalizar_error(self, error: Exception):
         """Restaura el botón y muestra el error sin cerrar el diálogo."""
