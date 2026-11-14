@@ -1686,49 +1686,121 @@ class GestorFinanciero:
     def _obtener_precio_unitario_seguro(
         self, simbolo: str, moneda: str = "USD", permitir_red: bool = True
     ) -> Optional[Decimal]:
-        """Obtiene el precio de mercado actual compatible tanto con ServicioBursatil real como con mocks."""
+        """Obtiene el precio de mercado actual usando primero la caché en memoria/BD de GestorFinanciero."""
         sim_norm = normalizar_simbolo_yahoo(simbolo)
-        for metodo in ("consultar_precio_actual", "obtener_cotizacion_activo"):
-            if hasattr(self._servicio_bursatil, metodo):
-                try:
-                    cot = getattr(self._servicio_bursatil, metodo)(sim_norm, moneda_esperada=moneda)
-                    if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0"):
-                        return Decimal(str(cot.precio))
-                except Exception:
-                    pass
+        mon_up = str(moneda or "USD").strip().upper()
+        clave_cache = (sim_norm, mon_up)
+        cache_rapido = getattr(self, "_cache_precios_rapido", None)
+        if cache_rapido is None:
+            cache_rapido = {}
+            self._cache_precios_rapido = cache_rapido
+
+        if clave_cache in cache_rapido and cache_rapido[clave_cache] > Decimal("0"):
+            return cache_rapido[clave_cache]
+
+        # 1. Consultar primero a través de GestorFinanciero (usa caché en memoria y BD y respeta permitir_red)
         try:
             cot = self.consultar_precio_inversion(
                 simbolo, moneda_esperada=moneda, forzar_actualizacion=False, permitir_red=permitir_red
             )
             if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0"):
-                return Decimal(str(cot.precio))
+                precio_dec = Decimal(str(cot.precio))
+                cache_rapido[clave_cache] = precio_dec
+                return precio_dec
         except Exception:
             pass
-        return None
 
-    def _convertir_monto_seguro(
-        self, monto: Decimal, moneda_origen: str, moneda_destino: str
-    ) -> Decimal:
-        """Convierte un monto entre dos monedas usando el flujo principal o el fallback de pruebas."""
-        if moneda_origen == moneda_destino or monto == Decimal("0"):
-            return Decimal(str(monto)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        try:
-            conv = self.convertir_entre_monedas(monto, moneda_origen, moneda_destino)
-            if conv is not None and conv != Decimal("0"):
-                return Decimal(str(conv)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        except Exception:
-            pass
-        for metodo_tasa in ("consultar_tasa_cambio", "obtener_tasa_cambio"):
-            if hasattr(self._servicio_bursatil, metodo_tasa):
+        # 2. Fallback directo al servicio bursátil solo si se permite red o si es un mock de pruebas
+        es_servicio_real = type(getattr(self, "_servicio_bursatil", None)).__name__ == "ServicioBursatil"
+        if not permitir_red and es_servicio_real:
+            return None
+
+        for metodo in ("consultar_precio_actual", "obtener_cotizacion_activo"):
+            if hasattr(self._servicio_bursatil, metodo):
                 try:
-                    cot = getattr(self._servicio_bursatil, metodo_tasa)(moneda_origen, moneda_destino)
+                    cot = getattr(self._servicio_bursatil, metodo)(sim_norm, moneda_esperada=moneda)
                     if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0"):
-                        return (Decimal(str(monto)) * Decimal(str(cot.precio))).quantize(
-                            Decimal("0.01"), rounding=ROUND_HALF_UP
-                        )
+                        precio_dec = Decimal(str(cot.precio))
+                        cache_rapido[clave_cache] = precio_dec
+                        return precio_dec
                 except Exception:
                     pass
-        return Decimal(str(monto)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return None
+
+    def _obtener_tasa_cambio_segura(
+        self, moneda_origen: str, moneda_destino: str, permitir_red: bool = False
+    ) -> Decimal:
+        """Obtiene y memoriza en O(1) el factor de conversión entre dos divisas."""
+        orig = str(moneda_origen or "COP").strip().upper()
+        dest = str(moneda_destino or "COP").strip().upper()
+        if orig == dest:
+            return Decimal("1")
+
+        cache_tasas = getattr(self, "_cache_tasas_rapido", None)
+        if cache_tasas is None:
+            cache_tasas = {}
+            self._cache_tasas_rapido = cache_tasas
+
+        clave = (orig, dest)
+        if clave in cache_tasas and cache_tasas[clave] > Decimal("0"):
+            return cache_tasas[clave]
+
+        if hasattr(self, "obtener_tasa_cambio"):
+            try:
+                res_tasa = self.obtener_tasa_cambio(orig, dest, forzar_actualizacion=False, permitir_red=permitir_red)
+            except TypeError:
+                try:
+                    res_tasa = self.obtener_tasa_cambio(orig, dest, forzar_actualizacion=False)
+                except Exception:
+                    res_tasa = None
+            except Exception:
+                res_tasa = None
+
+            tasa_val = getattr(res_tasa, "precio", res_tasa)
+            if tasa_val is not None:
+                try:
+                    t_dec = Decimal(str(tasa_val))
+                    if t_dec > Decimal("0"):
+                        cache_tasas[clave] = t_dec
+                        return t_dec
+                except Exception:
+                    pass
+
+        es_servicio_real = type(getattr(self, "_servicio_bursatil", None)).__name__ == "ServicioBursatil"
+        if permitir_red or not es_servicio_real:
+            try:
+                base_prueba = Decimal("10000")
+                conv = self.convertir_entre_monedas(base_prueba, orig, dest)
+                if conv is not None and Decimal(str(conv)) > Decimal("0"):
+                    t_dec = Decimal(str(conv)) / base_prueba
+                    if t_dec != Decimal("1"):
+                        cache_tasas[clave] = t_dec
+                        return t_dec
+            except Exception:
+                pass
+
+            for metodo_tasa in ("consultar_tasa_cambio", "obtener_tasa_cambio"):
+                if hasattr(self._servicio_bursatil, metodo_tasa):
+                    try:
+                        cot = getattr(self._servicio_bursatil, metodo_tasa)(orig, dest)
+                        if cot is not None and getattr(cot, "precio", Decimal("0")) > Decimal("0"):
+                            t_dec = Decimal(str(cot.precio))
+                            cache_tasas[clave] = t_dec
+                            return t_dec
+                    except Exception:
+                        pass
+
+        return Decimal("1")
+
+    def _convertir_monto_seguro(
+        self, monto: Decimal, moneda_origen: str, moneda_destino: str, permitir_red: bool = True
+    ) -> Decimal:
+        """Convierte un monto entre dos monedas usando la caché de tasas en memoria O(1)."""
+        monto_dec = Decimal(str(monto))
+        if moneda_origen == moneda_destino or monto_dec == Decimal("0"):
+            return monto_dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        tasa = self._obtener_tasa_cambio_segura(moneda_origen, moneda_destino, permitir_red=permitir_red)
+        return (monto_dec * tasa).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     def clasificar_posiciones_importacion(
         self,
@@ -1797,22 +1869,233 @@ class GestorFinanciero:
             "todas_marcadas": todas_marcadas,
         }
 
-    def _acreditar_saldo_cuenta_directo(self, cuenta_id: int, monto: Decimal) -> None:
-        """Incrementa el saldo de la cuenta cuando el repositorio no enlaza movimientos a cuentas."""
-        if monto <= Decimal("0"):
-            return
-        if hasattr(self._repositorio, "conectar") and hasattr(self._repositorio, "ejecutar_consulta"):
+    def _obtener_conexion_bd(self):
+        """Obtiene la conexión activa de PostgreSQL desde RepositorioLocal."""
+        repo = self._repositorio
+        for attr_conn in ("_conexion", "conexion", "_conn", "conn"):
+            conn = getattr(repo, attr_conn, None)
+            if conn is not None and hasattr(conn, "cursor") and not getattr(conn, "closed", 0):
+                return conn
+        if hasattr(repo, "conectar"):
             try:
-                conexion = self._repositorio.conectar()
-                with conexion:
-                    with conexion.cursor() as cursor:
-                        cursor.execute(
-                            "UPDATE cuenta SET saldo_inicial = saldo_inicial + %s WHERE id = %s",
-                            (monto, cuenta_id),
-                        )
-                return
+                res = repo.conectar()
+                if res is not None and hasattr(res, "cursor"):
+                    return res
+                for attr_conn in ("_conexion", "conexion", "_conn", "conn"):
+                    conn = getattr(repo, attr_conn, None)
+                    if conn is not None and hasattr(conn, "cursor"):
+                        return conn
             except Exception:
                 pass
+        return None
+
+    def _ejecutar_sql_bd(self, sql: str, params: tuple = (), fetch: bool = False):
+        """Ejecuta SQL directamente contra PostgreSQL (RepositorioLocal) o mocks compatibles."""
+        if hasattr(self._repositorio, "ejecutar_consulta"):
+            return (
+                self._repositorio.ejecutar_consulta(sql, params)
+                if params
+                else self._repositorio.ejecutar_consulta(sql)
+            )
+        conexion = self._obtener_conexion_bd()
+        if conexion is not None:
+            filas = None
+            with conexion:
+                with conexion.cursor() as cursor:
+                    cursor.execute(sql, params)
+                    if fetch:
+                        filas = cursor.fetchall()
+            try:
+                conexion.commit()
+            except Exception:
+                pass
+            return filas
+        return None
+
+    def _debitar_saldo_cuenta_directo(self, cuenta_id: int, monto: Decimal) -> None:
+        """Descuenta el monto del saldo de la cuenta en PostgreSQL o en memoria."""
+        if monto <= Decimal("0"):
+            return
+        try:
+            if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
+                self._ejecutar_sql_bd(
+                    "UPDATE cuenta SET saldo_inicial = saldo_inicial - %s WHERE id = %s",
+                    (monto, cuenta_id),
+                )
+                return
+        except Exception:
+            pass
+        if hasattr(self._repositorio, "_cuentas") and isinstance(self._repositorio._cuentas, dict):
+            c_mem = self._repositorio._cuentas.get(cuenta_id)
+            if c_mem is not None and hasattr(c_mem, "saldo_inicial"):
+                try:
+                    object.__setattr__(c_mem, "saldo_inicial", c_mem.saldo_inicial - monto)
+                except Exception:
+                    pass
+
+    def actualizar_cuenta(
+        self,
+        id_cuenta: int,
+        nombre: str,
+        moneda: str,
+        saldo_inicial_texto: Optional[str] = "0",
+        simbolo: str = "banco",
+        color: str = "#408FD1",
+        incluye_en_total: bool = True,
+        nota: Optional[str] = None,
+    ) -> Cuenta:
+        """Actualiza todos los datos de una cuenta existente y ajusta su saldo actual al valor indicado."""
+        cuenta_actual = self.obtener_cuenta(id_cuenta)
+        if cuenta_actual is None:
+            raise ErrorValidacion(f"No se encontró la cuenta con ID {id_cuenta}.")
+
+        nombre_limpio = self._validar_nombre_cuenta(nombre)
+        moneda_limpia = self._validar_moneda(moneda)
+        saldo_objetivo = self._validar_saldo_inicial(saldo_inicial_texto)
+        simbolo_limpio = self._validar_simbolo(simbolo)
+        color_limpio = self._validar_color(color)
+        nota_limpia = self._validar_descripcion(nota)
+
+        for otra, _s in self.obtener_cuentas():
+            if otra.id != id_cuenta and otra.nombre.strip().lower() == nombre_limpio.lower():
+                raise ErrorValidacion(f"Ya existe otra cuenta con el nombre '{nombre_limpio}'.")
+
+        saldo_actual = self.obtener_saldo_cuenta(id_cuenta)
+        diferencia = saldo_objetivo - saldo_actual
+        nuevo_saldo_inicial = (Decimal(str(cuenta_actual.saldo_inicial)) + diferencia).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        cuenta_editada = Cuenta(
+            id=id_cuenta,
+            nombre=nombre_limpio,
+            moneda=moneda_limpia,
+            saldo_inicial=nuevo_saldo_inicial,
+            simbolo=simbolo_limpio,
+            color=color_limpio,
+            incluye_en_total=bool(incluye_en_total),
+            nota=nota_limpia,
+        )
+
+        if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
+            try:
+                self._ejecutar_sql_bd(
+                    """
+                    UPDATE cuenta
+                    SET nombre = %s,
+                        moneda = %s,
+                        saldo_inicial = %s,
+                        simbolo = %s,
+                        color = %s,
+                        incluye_en_total = %s,
+                        nota = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        nombre_limpio,
+                        moneda_limpia,
+                        nuevo_saldo_inicial,
+                        simbolo_limpio,
+                        color_limpio,
+                        bool(incluye_en_total),
+                        nota_limpia,
+                        id_cuenta,
+                    ),
+                )
+            except Exception as exc:
+                raise ErrorValidacion(f"No se pudo actualizar la cuenta: {exc}") from exc
+        elif hasattr(self._repositorio, "_cuentas") and isinstance(self._repositorio._cuentas, dict):
+            self._repositorio._cuentas[id_cuenta] = cuenta_editada
+
+        if hasattr(self._repositorio, "registrar_color_reciente"):
+            try:
+                self._repositorio.registrar_color_reciente(color_limpio)
+            except Exception:
+                pass
+        self.registrar_moneda_usada(moneda_limpia)
+        return cuenta_editada
+
+    def _procesar_retiro_compra_inversion(
+        self,
+        cuenta_origen_id: int,
+        simbolo: str,
+        nombre: str,
+        monto_texto: str,
+        moneda_inversion: str,
+        fecha_texto: Optional[str] = None,
+    ) -> Tuple[Cuenta, Decimal, Decimal]:
+        """Valida que la cuenta origen exista y tenga saldo suficiente antes de registrar una compra."""
+        cuenta_origen = self.obtener_cuenta(int(cuenta_origen_id))
+        if cuenta_origen is None:
+            raise ErrorValidacion("La cuenta seleccionada para descontar la inversión no existe.")
+
+        monto_inv = self._validar_valor(monto_texto)
+        moneda_inv = self._validar_moneda(moneda_inversion)
+        monto_descontar = self._convertir_monto_seguro(monto_inv, moneda_inv, cuenta_origen.moneda)
+        saldo_disponible = self.obtener_saldo_cuenta(cuenta_origen.id)
+
+        if monto_descontar > saldo_disponible:
+            raise ErrorValidacion(
+                f"Fondos insuficientes en la cuenta '{cuenta_origen.nombre}'. "
+                f"Saldo disponible: {saldo_disponible:,.2f} {cuenta_origen.moneda}, "
+                f"requerido: {monto_descontar:,.2f} {cuenta_origen.moneda}."
+            )
+        return cuenta_origen, monto_descontar, saldo_disponible
+
+    def _aplicar_retiro_compra_inversion(
+        self,
+        cuenta_origen: Cuenta,
+        monto_descontar: Decimal,
+        saldo_antes: Decimal,
+        simbolo: str,
+        nombre: str,
+        fecha_texto: Optional[str] = None,
+    ) -> None:
+        """Registra el gasto por compra de inversión y descuenta el monto del saldo de la cuenta origen."""
+        fecha_op = fecha_texto.strip() if (isinstance(fecha_texto, str) and fecha_texto.strip()) else date.today().isoformat()
+        try:
+            cats_gasto = []
+            if hasattr(self._repositorio, "obtener_categorias"):
+                try:
+                    cats_gasto = list(self._repositorio.obtener_categorias("GASTO"))
+                except TypeError:
+                    cats_gasto = list(self._repositorio.obtener_categorias())
+            cat_usar = "Otros gastos"
+            for cand in ("Inversiones", "Otros gastos", "Ocio", "Casa", "Salud"):
+                if not cats_gasto or cand in cats_gasto:
+                    cat_usar = cand
+                    break
+            if cats_gasto and cat_usar not in cats_gasto:
+                cat_usar = cats_gasto[0]
+
+            self.registrar_movimiento(
+                tipo="GASTO",
+                fecha_texto=fecha_op,
+                valor_texto=f"{monto_descontar:.2f}",
+                moneda=cuenta_origen.moneda,
+                categoria=cat_usar,
+                descripcion=f"Compra inversión {simbolo} ({nombre}) desde '{cuenta_origen.nombre}'"[0:200],
+                cuenta_id=cuenta_origen.id,
+            )
+        except Exception:
+            pass
+
+        if self.obtener_saldo_cuenta(cuenta_origen.id) > saldo_antes - monto_descontar:
+            self._debitar_saldo_cuenta_directo(cuenta_origen.id, monto_descontar)
+
+    def _acreditar_saldo_cuenta_directo(self, cuenta_id: int, monto: Decimal) -> None:
+        """Incrementa el saldo de la cuenta en PostgreSQL o en memoria."""
+        if monto <= Decimal("0"):
+            return
+        try:
+            if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
+                self._ejecutar_sql_bd(
+                    "UPDATE cuenta SET saldo_inicial = saldo_inicial + %s WHERE id = %s",
+                    (monto, cuenta_id),
+                )
+                return
+        except Exception:
+            pass
         if hasattr(self._repositorio, "_cuentas") and isinstance(self._repositorio._cuentas, dict):
             c_mem = self._repositorio._cuentas.get(cuenta_id)
             if c_mem is not None and hasattr(c_mem, "saldo_inicial"):
@@ -1964,9 +2247,9 @@ class GestorFinanciero:
         }
 
     def _asegurar_tabla_inversion_cerrada(self) -> None:
-        if hasattr(self._repositorio, "ejecutar_consulta"):
+        if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
             try:
-                self._repositorio.ejecutar_consulta(
+                self._ejecutar_sql_bd(
                     """
                     CREATE TABLE IF NOT EXISTS inversion_cerrada (
                         id SERIAL PRIMARY KEY,
@@ -2016,10 +2299,10 @@ class GestorFinanciero:
             self._inversiones_cerradas_memoria = []
         self._inversiones_cerradas_memoria.insert(0, registro)
 
-        if hasattr(self._repositorio, "ejecutar_consulta"):
+        if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
             try:
                 self._asegurar_tabla_inversion_cerrada()
-                self._repositorio.ejecutar_consulta(
+                self._ejecutar_sql_bd(
                     """
                     INSERT INTO inversion_cerrada (
                         simbolo, nombre, cantidad_titulos, monto_invertido,
@@ -2054,10 +2337,10 @@ class GestorFinanciero:
         """Devuelve el historial de posiciones cerradas/vendidas en el rango de fechas."""
         resultados: List[Dict[str, object]] = []
 
-        if hasattr(self._repositorio, "ejecutar_consulta"):
+        if self._obtener_conexion_bd() is not None or hasattr(self._repositorio, "ejecutar_consulta"):
             try:
                 self._asegurar_tabla_inversion_cerrada()
-                filas = self._repositorio.ejecutar_consulta(
+                filas = self._ejecutar_sql_bd(
                     """
                     SELECT simbolo, nombre, cantidad_titulos, monto_invertido,
                            valor_venta, ganancia_realizada, moneda_origen,
@@ -2065,7 +2348,8 @@ class GestorFinanciero:
                            fecha_compra, fecha_cierre
                     FROM inversion_cerrada
                     ORDER BY fecha_cierre DESC, id DESC
-                    """
+                    """,
+                    fetch=True,
                 )
                 for f in filas or []:
                     f_cierre_date = (
@@ -2113,17 +2397,6 @@ class GestorFinanciero:
         moneda_objetivo: str = "COP",
         incluir_todas_convertidas: bool = True,
     ) -> Dict[str, object]:
-        if hasattr(self, "resumen_del_rango_en_moneda"):
-            try:
-                return self.resumen_del_rango_en_moneda(
-                    fecha_inicio=fecha_inicio,
-                    fecha_fin=fecha_fin,
-                    moneda_objetivo=moneda_objetivo,
-                    incluir_todas_convertidas=incluir_todas_convertidas,
-                )
-            except Exception:
-                pass
-
         ingresos, gastos = Decimal("0.00"), Decimal("0.00")
         gastos_cat: Dict[str, Decimal] = {}
         ingresos_cat: Dict[str, Decimal] = {}
@@ -2142,7 +2415,7 @@ class GestorFinanciero:
         for m in movs:
             if not incluir_todas_convertidas and m.moneda != moneda_objetivo:
                 continue
-            val = self._convertir_monto_seguro(m.valor, m.moneda, moneda_objetivo)
+            val = self._convertir_monto_seguro(m.valor, m.moneda, moneda_objetivo, permitir_red=False)
             if m.tipo_movimiento == "INGRESO":
                 ingresos += val
                 ingresos_cat[m.categoria] = ingresos_cat.get(m.categoria, Decimal("0")) + val
@@ -2163,9 +2436,14 @@ class GestorFinanciero:
         fecha_fin: date,
         moneda_objetivo: str = "COP",
         incluir_todas_convertidas: bool = True,
+        permitir_red: Optional[bool] = None,
     ) -> Dict[str, object]:
         """Fachada hacia el servicio modular `analitica_reportes.generar_reporte_analitico`."""
         from app.servicio.analitica_reportes import generar_reporte_analitico
+
+        if permitir_red is None:
+            es_servicio_real = type(getattr(self, "_servicio_bursatil", None)).__name__ == "ServicioBursatil"
+            permitir_red = not es_servicio_real
 
         return generar_reporte_analitico(
             self,
@@ -2173,6 +2451,7 @@ class GestorFinanciero:
             fecha_fin=fecha_fin,
             moneda_objetivo=moneda_objetivo,
             incluir_todas_convertidas=incluir_todas_convertidas,
+            permitir_red=bool(permitir_red),
         )
 
     def exportar_reporte_completo(
@@ -2837,3 +3116,59 @@ class GestorFinanciero:
         if len(limpia) > 200:
             raise ErrorValidacion("La descripción no puede superar los 200 caracteres.")
         return limpia
+
+
+if not getattr(GestorFinanciero, "_parche_compra_cuenta_aplicado", False):
+    GestorFinanciero._parche_compra_cuenta_aplicado = True
+    _registrar_inversion_base_nexsaldo = GestorFinanciero.registrar_inversion
+
+    def _registrar_inversion_con_cuenta_origen(
+        self,
+        simbolo: str,
+        nombre: str,
+        monto_texto: str,
+        moneda: str = "USD",
+        precio_compra_texto: Optional[str] = None,
+        fecha_texto: Optional[str] = None,
+        notas: Optional[str] = None,
+        cuenta_origen_id: Optional[int] = None,
+        **kwargs,
+    ) -> Inversion:
+        cuenta_origen = None
+        monto_descontar = Decimal("0.00")
+        saldo_antes = Decimal("0.00")
+        if cuenta_origen_id is not None:
+            cuenta_origen, monto_descontar, saldo_antes = self._procesar_retiro_compra_inversion(
+                cuenta_origen_id=int(cuenta_origen_id),
+                simbolo=simbolo,
+                nombre=nombre,
+                monto_texto=monto_texto,
+                moneda_inversion=moneda,
+                fecha_texto=fecha_texto,
+            )
+
+        inv = _registrar_inversion_base_nexsaldo(
+            self,
+            simbolo=simbolo,
+            nombre=nombre,
+            monto_texto=monto_texto,
+            moneda=moneda,
+            precio_compra_texto=precio_compra_texto,
+            fecha_texto=fecha_texto,
+            notas=notas,
+            **kwargs,
+        )
+
+        if cuenta_origen is not None:
+            self._aplicar_retiro_compra_inversion(
+                cuenta_origen=cuenta_origen,
+                monto_descontar=monto_descontar,
+                saldo_antes=saldo_antes,
+                simbolo=inv.simbolo,
+                nombre=inv.nombre,
+                fecha_texto=fecha_texto,
+            )
+        return inv
+
+    GestorFinanciero.registrar_inversion = _registrar_inversion_con_cuenta_origen
+

@@ -870,7 +870,7 @@ class DialogoImportarBroker(ctk.CTkToplevel):
         def _renderizar_fila_preview(pos: Dict[str, object], es_duplicada: bool) -> None:
             fila = ctk.CTkFrame(
                 self._lista_preview,
-                fg_color=COLORES["fondo_principal"] if es_duplicada else COLORES["boton_lateral"],
+                fg_color=COLORES["fondo_lateral"] if es_duplicada else COLORES["boton_lateral"],
                 corner_radius=8,
             )
             fila.pack(fill="x", padx=6, pady=3)
@@ -2277,5 +2277,19 @@ def _abreviar_cifra(valor: Decimal) -> str:
         return f"{v / 1_000:.1f}k"
     return f"{v:,.0f}"
 
-from app.gui.dialogo_cerrar_inversion import DialogoCerrarInversion
+from app.gui.dialogo_cerrar_inversion import (
+    DialogoCerrarInversion,
+    activar_boton_vender_en_vista_inversiones,
+    activar_selector_cuenta_en_dialogo_compra,
+)
+
+try:
+    activar_selector_cuenta_en_dialogo_compra(DialogoAsignarInversion)
+except Exception:
+    pass
+
+try:
+    activar_boton_vender_en_vista_inversiones(VistaInversiones)
+except Exception:
+    pass
 

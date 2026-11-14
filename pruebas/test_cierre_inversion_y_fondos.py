@@ -3,10 +3,12 @@
 2. Creación automática de cuenta de broker (`eToro`, `Binance`) con saldo 0 y
    cierre/venta de posiciones (`cerrar_inversion`) acreditando fondos en la cuenta elegida
    (incluyendo conversión de divisa USD -> COP cuando la cuenta destino está en COP).
-3. Bloqueo de transferencias cuando la cuenta origen no tiene fondos suficientes.
-4. Pre-validación instantánea de duplicados (`clasificar_posiciones_importacion`) antes de
-   habilitar la importación, separando operaciones nuevas vs. duplicadas.
-5. Módulo de Reportes (`generar_radiografia_y_salud_financiera`, `obtener_inversiones_cerradas`
+3. Descuento automático de fondos de la cuenta origen al comprar/registrar una inversión
+   (`registrar_inversion(..., cuenta_origen_id=...)`) y bloqueo si no hay saldo suficiente.
+4. Edición completa de cuentas existentes (`actualizar_cuenta`).
+5. Bloqueo de transferencias cuando la cuenta origen no tiene fondos suficientes.
+6. Pre-validación instantánea de duplicados (`clasificar_posiciones_importacion`).
+7. Módulo de Reportes (`generar_radiografia_y_salud_financiera`, `obtener_inversiones_cerradas`
    y `exportar_reporte_completo` en formatos `.csv`, `.html` y `.xlsx`).
 """
 
@@ -320,6 +322,71 @@ def test_cerrar_inversion_convierte_a_cop_si_cuenta_destino_es_cop():
     assert gestor.obtener_saldo_cuenta(cuenta_principal.id) == Decimal("1100000.00")
 
 
+def test_comprar_inversion_descuenta_fondos_de_cuenta_origen():
+    repo = _RepoMemoriaPruebas()
+    gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
+
+    cuenta_cop = gestor.crear_cuenta("Bancolombia", "COP", "1000000", "banco", "#408FD1")
+
+    # 1. Si intenta invertir $500 USD ($2,000,000 COP a tasa 4000) desde cuenta con $1,000,000 COP -> bloquea
+    with pytest.raises(ErrorValidacion, match="Fondos insuficientes"):
+        gestor.registrar_inversion(
+            simbolo="VOO",
+            nombre="Vanguard S&P 500",
+            monto_texto="500.00",
+            moneda="USD",
+            precio_compra_texto="250.00",
+            fecha_texto="2026-11-05",
+            cuenta_origen_id=cuenta_cop.id,
+        )
+
+    # 2. Invertir $100 USD ($400,000 COP a tasa 4000) descuenta $400,000 COP de 'Bancolombia'
+    inv = gestor.registrar_inversion(
+        simbolo="VOO",
+        nombre="Vanguard S&P 500",
+        monto_texto="100.00",
+        moneda="USD",
+        precio_compra_texto="250.00",
+        fecha_texto="2026-11-05",
+        cuenta_origen_id=cuenta_cop.id,
+    )
+    assert inv.id is not None
+    assert gestor.obtener_saldo_cuenta(cuenta_cop.id) == Decimal("600000.00")
+
+
+def test_actualizar_cuenta_modifica_datos_y_ajusta_saldo():
+    repo = _RepoMemoriaPruebas()
+    gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
+
+    original = gestor.crear_cuenta(
+        nombre="Cuenta Inicial",
+        moneda="COP",
+        saldo_inicial_texto="500000",
+        simbolo="banco",
+        color="#408FD1",
+        incluye_en_total=True,
+        nota="Nota original",
+    )
+
+    editada = gestor.actualizar_cuenta(
+        id_cuenta=original.id,
+        nombre="Cuenta Editada",
+        moneda="USD",
+        saldo_inicial_texto="1250",
+        simbolo="boveda",
+        color="#2ECC71",
+        incluye_en_total=False,
+        nota="Nota actualizada",
+    )
+    assert editada.nombre == "Cuenta Editada"
+    assert editada.moneda == "USD"
+    assert editada.simbolo == "boveda"
+    assert editada.color == "#2ECC71"
+    assert editada.incluye_en_total is False
+    assert editada.nota == "Nota actualizada"
+    assert gestor.obtener_saldo_cuenta(original.id) == Decimal("1250")
+
+
 def test_prevalidacion_duplicados_separa_nuevas_y_duplicadas():
     repo = _RepoMemoriaPruebas()
     gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
@@ -375,16 +442,13 @@ def test_reportes_salud_financiera_radiografia_y_exportacion(tmp_path):
     repo = _RepoMemoriaPruebas()
     gestor = GestorFinanciero(repo, servicio_bursatil=_ServicioBursatilFalso())
 
-    # 1. Crear cuentas en COP y USD
     c_cop = gestor.crear_cuenta("Principal", "COP", "2000000", "banco", "#408FD1")
     c_usd = gestor.asegurar_cuenta_broker("eToro", moneda="USD")
 
-    # 2. Registrar movimientos en octubre y noviembre para probar comparativa Mes a Mes (MoM)
     gestor.registrar_movimiento("GASTO", "2026-10-15", "400000", "COP", "Alimentación", "Mercado oct")
     gestor.registrar_movimiento("INGRESO", "2026-11-05", "3000000", "COP", "Salario", "Nómina nov")
     gestor.registrar_movimiento("GASTO", "2026-11-10", "600000", "COP", "Alimentación", "Mercado nov")
 
-    # 3. Registrar dos inversiones y cerrar una con ganancia
     inv_abierta = gestor.registrar_inversion(
         simbolo="VOO",
         nombre="Vanguard S&P 500",
@@ -403,7 +467,6 @@ def test_reportes_salud_financiera_radiografia_y_exportacion(tmp_path):
     )
     gestor.cerrar_inversion(inv_vender.id, cuenta_destino=c_usd.id, fecha_cierre=date(2026, 11, 10))
 
-    # 4. Generar radiografía y salud financiera de noviembre 2026
     rep = gestor.generar_radiografia_y_salud_financiera(
         fecha_inicio=date(2026, 11, 1),
         fecha_fin=date(2026, 11, 30),
@@ -419,7 +482,6 @@ def test_reportes_salud_financiera_radiografia_y_exportacion(tmp_path):
     assert rep["posiciones_cerradas"][0]["simbolo"] == "AAPL"
     assert rep["posiciones_cerradas"][0]["ganancia_realizada"] == Decimal("100.00")
 
-    # 5. Probar exportación en CSV y HTML
     ruta_csv = str(tmp_path / "estado_cuenta.csv")
     out_csv = gestor.exportar_reporte_completo(
         ruta_destino=ruta_csv,

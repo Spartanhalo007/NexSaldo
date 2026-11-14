@@ -2,7 +2,7 @@
 
 Separa la lógica matemática de diagnóstico financiero y la generación de reportes (.xlsx, .csv, .html)
 fuera de `GestorFinanciero`, cumpliendo el Principio de Responsabilidad Única (SRP) y manteniendo
-funciones pequeñas, puras y documentadas.
+funciones pequeñas, puras y sin llamadas de red bloqueantes en el hilo principal.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import csv
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 DOS_DECIMALES = Decimal("0.01")
 UN_DECIMAL = Decimal("0.1")
@@ -91,8 +91,9 @@ def generar_reporte_analitico(
     fecha_fin: date,
     moneda_objetivo: str = "COP",
     incluir_todas_convertidas: bool = True,
+    permitir_red: bool = False,
 ) -> Dict[str, object]:
-    """Orquesta el cálculo completo del módulo Reportes delegando en helpers especializados."""
+    """Orquesta el cálculo completo del módulo Reportes sin bloquear el hilo de interfaz gráfica."""
     mon = gestor._validar_moneda(moneda_objetivo)
     actual = gestor._calcular_ingresos_y_gastos_rango(
         fecha_inicio, fecha_fin, moneda_objetivo=mon, incluir_todas_convertidas=incluir_todas_convertidas
@@ -117,9 +118,9 @@ def generar_reporte_analitico(
         gestor, mon, incluir_todas_convertidas
     )
 
-    # 2. Portafolio abierto y posiciones cerradas
+    # 2. Portafolio abierto (con caché O(1) por símbolo) y posiciones cerradas
     val_inv, pnl_abierto, gan_abiertas, eval_abiertas = _analizar_inversiones_abiertas(
-        gestor, mon, incluir_todas_convertidas, mapa_divisas, entidades
+        gestor, mon, incluir_todas_convertidas, mapa_divisas, entidades, permitir_red=permitir_red
     )
     cerradas = gestor.obtener_inversiones_cerradas(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
     pnl_realizado, gan_cerradas, eval_cerradas = _analizar_inversiones_cerradas(
@@ -134,8 +135,13 @@ def generar_reporte_analitico(
         else Decimal("0.0")
     )
 
+    # Si hay déficit neto en el periodo (gastos > ingresos), se descuenta del colchón de liquidez disponible
+    liquidez_disponible_emergencia = max(
+        Decimal("0.00"),
+        liquidez_total + (ahorro_neto if ahorro_neto < Decimal("0") else Decimal("0.00")),
+    )
     meses_supervivencia = (
-        (liquidez_total / proyeccion_mensual).quantize(UN_DECIMAL, rounding=ROUND_HALF_UP)
+        (liquidez_disponible_emergencia / proyeccion_mensual).quantize(UN_DECIMAL, rounding=ROUND_HALF_UP)
         if proyeccion_mensual > Decimal("0")
         else None
     )
@@ -221,7 +227,7 @@ def _analizar_cuentas_y_divisas(gestor, mon: str, incluir_todas: bool):
     for cuenta, saldo in gestor.obtener_cuentas():
         if not cuenta.incluye_en_total or (not incluir_todas and cuenta.moneda != mon):
             continue
-        val_conv = gestor._convertir_monto_seguro(saldo, cuenta.moneda, mon)
+        val_conv = gestor._convertir_monto_seguro(saldo, cuenta.moneda, mon, permitir_red=False)
         val_pos = max(Decimal("0.00"), cuantizar_moneda(val_conv))
         liquidez_total += val_pos
         if val_pos > Decimal("0"):
@@ -237,39 +243,96 @@ def _analizar_cuentas_y_divisas(gestor, mon: str, incluir_todas: bool):
     return liquidez_total, mapa_divisas, entidades
 
 
-def _analizar_inversiones_abiertas(gestor, mon: str, incluir_todas: bool, mapa_divisas: dict, entidades: list):
+def _analizar_inversiones_abiertas(
+    gestor,
+    mon: str,
+    incluir_todas: bool,
+    mapa_divisas: dict,
+    entidades: list,
+    permitir_red: bool = False,
+):
     valor_inversiones = Decimal("0.00")
     pnl_abierto = Decimal("0.00")
     ganadoras = 0
     evaluadas = 0
 
+    from app.gui.dialogo_cerrar_inversion import extraer_valor_actual_de_valoracion
+
+    mapa_val_cache: Dict[int, object] = {}
+    if hasattr(gestor, "valorar_portafolio"):
+        try:
+            res_p = gestor.valorar_portafolio(
+                moneda_objetivo=mon,
+                incluir_todas_convertidas=incluir_todas,
+                forzar_actualizacion=False,
+                permitir_red=False,
+            )
+            for v_item in (res_p.get("posiciones", []) if isinstance(res_p, dict) else []):
+                inv_id = getattr(getattr(v_item, "inversion", None), "id", None)
+                if inv_id is not None:
+                    mapa_val_cache[inv_id] = v_item
+        except Exception:
+            pass
+
+    precios_por_simbolo: Dict[Tuple[str, str], Optional[Decimal]] = {}
+    agrupado_activo: Dict[Tuple[str, str], Dict[str, object]] = {}
+
     for inv in gestor.obtener_inversiones():
         if not incluir_todas and inv.moneda != mon:
             continue
-        precio_unit = gestor._obtener_precio_unitario_seguro(inv.simbolo, inv.moneda, permitir_red=False)
-        val_nativo = (
-            cuantizar_moneda(inv.cantidad_titulos * precio_unit)
-            if (precio_unit is not None and precio_unit > Decimal("0") and inv.cantidad_titulos > Decimal("0"))
-            else cuantizar_moneda(inv.monto_invertido)
-        )
+        val_nativo: Optional[Decimal] = None
+        if inv.id is not None and inv.id in mapa_val_cache:
+            val_nativo = extraer_valor_actual_de_valoracion(
+                mapa_val_cache[inv.id], inv, moneda_valoracion=mon
+            )
+
+        if val_nativo is None:
+            clave_sim = (inv.simbolo.strip().upper(), inv.moneda)
+            if clave_sim not in precios_por_simbolo:
+                precios_por_simbolo[clave_sim] = gestor._obtener_precio_unitario_seguro(
+                    inv.simbolo, inv.moneda, permitir_red=permitir_red
+                )
+            precio_unit = precios_por_simbolo[clave_sim]
+
+            titulos = inv.cantidad_titulos
+            if titulos <= Decimal("0") and getattr(inv, "precio_compra", None) is not None:
+                try:
+                    p_c = Decimal(str(inv.precio_compra))
+                    if p_c > Decimal("0"):
+                        titulos = inv.monto_invertido / p_c
+                except Exception:
+                    pass
+
+            val_nativo = (
+                cuantizar_moneda(titulos * precio_unit)
+                if (precio_unit is not None and precio_unit > Decimal("0") and titulos > Decimal("0"))
+                else cuantizar_moneda(inv.monto_invertido)
+            )
+        clave_sim = (inv.simbolo.strip().upper(), inv.moneda)
         gan_nativa = val_nativo - inv.monto_invertido
         evaluadas += 1
         if gan_nativa >= Decimal("0"):
             ganadoras += 1
 
-        val_conv = gestor._convertir_monto_seguro(val_nativo, inv.moneda, mon)
-        gan_conv = gestor._convertir_monto_seguro(gan_nativa, inv.moneda, mon)
+        val_conv = gestor._convertir_monto_seguro(val_nativo, inv.moneda, mon, permitir_red=False)
+        gan_conv = gestor._convertir_monto_seguro(gan_nativa, inv.moneda, mon, permitir_red=False)
         valor_inversiones += val_conv
         pnl_abierto += gan_conv
         mapa_divisas[inv.moneda] = mapa_divisas.get(inv.moneda, Decimal("0")) + val_conv
-        entidades.append(
-            {
+
+        if clave_sim not in agrupado_activo:
+            agrupado_activo[clave_sim] = {
                 "nombre": f"{inv.simbolo} ({inv.nombre[:16]})",
                 "tipo": "INVERSION",
                 "moneda_origen": inv.moneda,
                 "valor_convertido": val_conv,
             }
-        )
+        else:
+            agrupado_activo[clave_sim]["valor_convertido"] = (
+                agrupado_activo[clave_sim]["valor_convertido"] + val_conv  # type: ignore[operator]
+            )
+
+    entidades.extend(agrupado_activo.values())
     return valor_inversiones, pnl_abierto, ganadoras, evaluadas
 
 
@@ -281,7 +344,7 @@ def _analizar_inversiones_cerradas(gestor, cerradas: List[Dict[str, object]], mo
         mon_op = str(op.get("moneda_origen", "USD"))
         if gan_op >= Decimal("0"):
             ganadoras += 1
-        pnl_realizado += gestor._convertir_monto_seguro(gan_op, mon_op, mon)
+        pnl_realizado += gestor._convertir_monto_seguro(gan_op, mon_op, mon, permitir_red=False)
     return pnl_realizado, ganadoras, len(cerradas)
 
 
@@ -314,6 +377,7 @@ def exportar_estado_cuenta(
         fecha_fin=fecha_fin,
         moneda_objetivo=moneda_objetivo,
         incluir_todas_convertidas=incluir_todas_convertidas,
+        permitir_red=False,
     )
     movimientos = _obtener_movimientos_rango(gestor, fecha_inicio, fecha_fin)
     fmt = (formato or "xlsx").strip().lower()

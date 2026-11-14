@@ -17,7 +17,9 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
 import os
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -443,6 +445,10 @@ class VistaReportes(ctk.CTkFrame):
     # Actualización de Datos y Renderizado
     # ------------------------------------------------------------------
     def refrescar(self) -> None:
+        self._renderizar_reporte_actual(permitir_red=False)
+        self._precalentar_cotizaciones_fondo()
+
+    def _renderizar_reporte_actual(self, permitir_red: bool = False) -> None:
         mon = self._moneda_actual
         try:
             rep = self._gestor.generar_radiografia_y_salud_financiera(
@@ -450,7 +456,18 @@ class VistaReportes(ctk.CTkFrame):
                 fecha_fin=self._fecha_fin,
                 moneda_objetivo=mon,
                 incluir_todas_convertidas=self._incluir_todas_convertidas,
+                permitir_red=permitir_red,
             )
+        except TypeError:
+            try:
+                rep = self._gestor.generar_radiografia_y_salud_financiera(
+                    fecha_inicio=self._fecha_inicio,
+                    fecha_fin=self._fecha_fin,
+                    moneda_objetivo=mon,
+                    incluir_todas_convertidas=self._incluir_todas_convertidas,
+                )
+            except Exception:
+                return
         except Exception:
             return
 
@@ -462,6 +479,66 @@ class VistaReportes(ctk.CTkFrame):
         self._renderizar_posiciones_cerradas(
             rep["posiciones_cerradas"], salud["pnl_realizado"], mon
         )
+
+    def _precalentar_cotizaciones_fondo(self) -> None:
+        if getattr(self, "_cargando_cotizaciones_bg", False):
+            return
+        try:
+            inversiones = list(self._gestor.obtener_inversiones())
+        except Exception:
+            inversiones = []
+
+        cache_precios = getattr(self._gestor, "_cache_precios_rapido", {}) or {}
+        pares_simbolos = {
+            (inv.simbolo.strip().upper(), inv.moneda.strip().upper())
+            for inv in inversiones
+            if (inv.simbolo.strip().upper(), inv.moneda.strip().upper()) not in cache_precios
+        }
+        mon_obj = self._moneda_actual.strip().upper()
+        cache_tasas = getattr(self._gestor, "_cache_tasas_rapido", {}) or {}
+        divisas_faltantes = {
+            inv.moneda.strip().upper()
+            for inv in inversiones
+            if inv.moneda.strip().upper() != mon_obj and (inv.moneda.strip().upper(), mon_obj) not in cache_tasas
+        }
+        if ("USD", "COP") not in cache_tasas:
+            divisas_faltantes.add("USD")
+
+        if not pares_simbolos and not divisas_faltantes:
+            return
+
+        self._cargando_cotizaciones_bg = True
+
+        def _tarea_bg() -> None:
+            actualizado = False
+            try:
+                for div_o in divisas_faltantes:
+                    if hasattr(self._gestor, "_obtener_tasa_cambio_segura"):
+                        t = self._gestor._obtener_tasa_cambio_segura(div_o, mon_obj, permitir_red=True)
+                        if t > Decimal("0"):
+                            actualizado = True
+
+                if pares_simbolos and hasattr(self._gestor, "_obtener_precio_unitario_seguro"):
+                    def _consultar_uno(par):
+                        s, m = par
+                        return self._gestor._obtener_precio_unitario_seguro(s, m, permitir_red=True)
+
+                    with ThreadPoolExecutor(max_workers=min(6, len(pares_simbolos))) as pool:
+                        for p_res in pool.map(_consultar_uno, pares_simbolos):
+                            if p_res is not None and p_res > Decimal("0"):
+                                actualizado = True
+            except Exception:
+                pass
+            finally:
+                self._cargando_cotizaciones_bg = False
+
+            if actualizado:
+                try:
+                    self.after(0, lambda: self._renderizar_reporte_actual(permitir_red=False))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_tarea_bg, daemon=True).start()
 
     def _actualizar_tarjetas_kpi(self, salud: Dict[str, object], mon: str) -> None:
         tasa_ahorro: Decimal = salud["tasa_ahorro_pct"]  # type: ignore[assignment]
