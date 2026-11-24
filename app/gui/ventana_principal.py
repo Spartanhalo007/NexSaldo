@@ -10,12 +10,15 @@ from app.gui.adaptadores_moneda import (
     VistaCuentasConDivisa,
     VistaMovimientosConDivisa,
 )
-from app.gui.estilos import COLORES, FUENTE, configurar_tabla, configurar_tema
+from app.gui.estilos import (
+    COLORES, FUENTE, cargar_tema, configurar_tabla, configurar_tema, guardar_tema,
+)
 from app.gui.vista_gastos import VistaGastos
 from app.gui.vista_ingresos import VistaIngresos
 from app.gui.vista_inversiones import VistaInversiones
 from app.gui.vista_reportes import VistaReportes
 from app.gui.vista_resumen import VistaResumen
+from app.gui.vista_temas import VistaTemas
 
 RUTA_LOGO = Path(__file__).resolve().parent / "recursos" / "logo_64.png"
 
@@ -28,7 +31,7 @@ NAVEGACION = [
     ("Reportes", "reportes"),
     ("Categorías", "pendiente"),
     ("Configuración", "pendiente"),
-    ("Modo Oscuro", "tema"),
+    ("Themes", "tema"),
 ]
 
 MODULOS_PENDIENTES = {
@@ -48,7 +51,9 @@ class VentanaPrincipal(ctk.CTk):
         self.geometry("1100x680")
         self.minsize(960, 600)
 
-        configurar_tema()
+        self._tema = cargar_tema()
+        self._tema_guardado = True
+        configurar_tema(self._tema)
         configurar_tabla(self)
         self.configure(fg_color=COLORES["fondo_contenido"])
 
@@ -91,6 +96,7 @@ class VentanaPrincipal(ctk.CTk):
             fg_color=COLORES["fondo_lateral"],
             corner_radius=0,
         )
+        self._barra = barra
         barra.pack(side="left", fill="y")
         barra.pack_propagate(False)
 
@@ -204,13 +210,55 @@ class VentanaPrincipal(ctk.CTk):
             filtro = "GASTO" if texto == "Gastos" else "INGRESO"
             self._mostrar_movimientos(filtro_tipo=filtro, titulo=texto)
         elif modulo == "tema":
-            self._mostrar_pendiente(
-                "Modo Oscuro", "Cambio de tema visual en desarrollo."
+            self._activar_vista_cacheada(
+                "tema", lambda: VistaTemas(
+                    self._area, self._tema, self._cambiar_tema, self._tema_guardado
+                )
             )
         else:
             mensaje = MODULOS_PENDIENTES.get(texto, "Módulo en desarrollo.")
             self._mostrar_pendiente(texto, mensaje)
         self._resaltar_boton(texto)
+
+    def _cambiar_tema(self, tema):
+        if tema == self._tema and self._tema_guardado:
+            return
+        self._tema = tema
+        self._tema_guardado = guardar_tema(tema)
+        configurar_tema(tema)
+        configurar_tabla(self)
+
+        # Los widgets y Canvas reciben colores al construirse. Invalida las vistas
+        # solo al cambiar de tema, sin volver a crear la raíz ni el gestor.
+        self._liberar_enlaces_scroll()
+        self._barra.destroy()
+        self._area.destroy()
+        self._vistas_cache.clear()
+        self._botones.clear()
+        self._vista_actual = None
+        self._clave_vista_actual = None
+        self.configure(fg_color=COLORES["fondo_contenido"])
+        self._construir_barra_lateral()
+        self._construir_area_contenido()
+        self._al_navegar("tema", "Themes")
+        self._vista_actual.enfocar_tema(tema)
+
+    def _liberar_enlaces_scroll(self):
+        # CTkScrollableFrame registra estos enlaces en la raíz y no los elimina al destruirse.
+        # Solo se retiran sus controladores Python; los demás enlaces globales se conservan.
+        nombres = ("_mouse_wheel_all", "_keyboard_shift_press_all", "_keyboard_shift_release_all")
+        prefijo = 'if {"['  # formato de los callbacks Python en un enlace Tcl
+        for evento in self.bind_all():
+            originales = (self.bind_all(evento) or "").splitlines()
+            vigentes = []
+            for linea in originales:
+                comando = linea.removeprefix(prefijo).partition(" ")[0]
+                if linea.startswith(prefijo) and comando.endswith(nombres):
+                    self.deletecommand(comando)
+                    continue
+                vigentes.append(linea)
+            if vigentes != originales:
+                self.tk.call("bind", "all", evento, "\n".join(vigentes))
 
     def _mostrar_resumen(self):
         self._activar_vista_cacheada(

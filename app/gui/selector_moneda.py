@@ -242,8 +242,9 @@ class BarraFiltroMoneda(ctk.CTkFrame):
                 fila_controles,
                 values=[MODO_SOLO_DIVISA, MODO_TODO_CONVERTIDO],
                 variable=self._var_modo,
-                selected_color=COLORES["acento"],
-                selected_hover_color=COLORES["acento_hover"],
+                # El texto del control segmentado es común a todos sus botones.
+                selected_color=COLORES.get("acento_intenso", COLORES["acento"]),
+                selected_hover_color=COLORES.get("intenso_hover", COLORES["acento_hover"]),
                 unselected_color=COLORES["boton_lateral"],
                 unselected_hover_color=COLORES["hover_lateral"],
                 text_color=COLORES["texto"],

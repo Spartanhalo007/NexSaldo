@@ -35,7 +35,7 @@ from app.gui.estilos import COLORES, FUENTE
 from app.gui.formato import formatear_valor
 from app.gui.selector_moneda import BarraFiltroMoneda
 
-PALETA_DIVISAS = ("#FBB718", "#2ECC71", "#408FD1", "#9B7EDE", "#E86F9A")
+COLORES_SECUNDARIOS_DIVISAS = ("#2ECC71", "#408FD1", "#9B7EDE", "#E86F9A")
 FORMATOS_EXPORTACION: Dict[str, Tuple[str, List[Tuple[str, str]], str]] = {
     "xlsx": (".xlsx", [("Excel Workbook (.xlsx)", "*.xlsx")], "estado_cuenta_nexsaldo.xlsx"),
     "csv": (".csv", [("Archivo CSV (.csv)", "*.csv")], "estado_cuenta_nexsaldo.csv"),
@@ -449,6 +449,9 @@ class VistaReportes(ctk.CTkFrame):
         self._precalentar_cotizaciones_fondo()
 
     def _renderizar_reporte_actual(self, permitir_red: bool = False) -> None:
+        # Una consulta en segundo plano puede terminar tras cambiar el tema.
+        if not self.winfo_exists():
+            return
         mon = self._moneda_actual
         try:
             rep = self._gestor.generar_radiografia_y_salud_financiera(
@@ -642,9 +645,10 @@ class VistaReportes(ctk.CTkFrame):
             font=(FUENTE, 10, "bold"),
             anchor="w",
         )
+        paleta_divisas = (COLORES["acento"], *COLORES_SECUNDARIOS_DIVISAS)
         segmentos_div = (
             [
-                (float(item_d["porcentaje"]), PALETA_DIVISAS[idx % len(PALETA_DIVISAS)])
+                (float(item_d["porcentaje"]), paleta_divisas[idx % len(paleta_divisas)])
                 for idx, item_d in enumerate(exp_divisas)
             ]
             if patrimonio > Decimal("0")

@@ -500,7 +500,7 @@ class VistaResumen(ctk.CTkFrame):
                     continue
                 h_seg = max(2.0, float(monto) * escala_pos)
                 y_sig = max(float(margen_sup), y_cursor - h_seg)
-                color_cat = colores_ingresos.get(cat, "#7DC98F")
+                color_cat = colores_ingresos.get(cat, COLORES["exito"])
                 self._lienzo.create_rectangle(
                     x_ing - ancho_barra // 2,
                     int(y_sig),
@@ -541,7 +541,7 @@ class VistaResumen(ctk.CTkFrame):
                     continue
                 h_seg = max(2.0, float(monto) * escala_neg)
                 y_sig = min(float(alto - margen_inf), y_cursor + h_seg)
-                color_cat = colores_gastos.get(cat, "#FBB718")
+                color_cat = colores_gastos.get(cat, COLORES["acento"])
                 self._lienzo.create_rectangle(
                     x_gas - ancho_barra // 2,
                     int(y_cursor),
@@ -728,7 +728,7 @@ class VistaResumen(ctk.CTkFrame):
             if monto <= Decimal("0"):
                 continue
             pct = (monto / total_ingresos) * Decimal("100") if total_ingresos > Decimal("0") else Decimal("0")
-            color_cat = colores_ingresos.get(cat, "#7DC98F")
+            color_cat = colores_ingresos.get(cat, COLORES["exito"])
             self._crear_fila_desglose(
                 nombre=f"▲ {cat} (Ingreso)",
                 monto_texto=f"+ {formatear_valor(monto, moneda)}",
@@ -744,7 +744,7 @@ class VistaResumen(ctk.CTkFrame):
             if monto <= Decimal("0"):
                 continue
             pct = (monto / total_gastos) * Decimal("100") if total_gastos > Decimal("0") else Decimal("0")
-            color_cat = colores_gastos.get(cat, "#FBB718")
+            color_cat = colores_gastos.get(cat, COLORES["acento"])
             self._crear_fila_desglose(
                 nombre=f"▼ {cat} (Gasto)",
                 monto_texto=f"- {formatear_valor(monto, moneda)}",
@@ -791,6 +791,8 @@ class VistaResumen(ctk.CTkFrame):
         ).pack(side="right", padx=6)
 
     def _actualizar_panel_cuentas(self, moneda: str, incluir_todas: bool):
+        if not self.winfo_exists():
+            return
         for hijo in self._contenedor_cuentas_resumen.winfo_children():
             hijo.destroy()
 

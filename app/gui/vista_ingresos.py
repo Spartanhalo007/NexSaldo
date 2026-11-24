@@ -252,6 +252,8 @@ class VistaIngresos(ctk.CTkFrame):
         self._refrescar_vista()
 
     def _refrescar_vista(self, _desde_hilo_tasas: bool = False):
+        if not self.winfo_exists():
+            return
         fecha_ini = self._fecha_inicio
         fecha_fin = self._fecha_fin
         sufijo_modo = (

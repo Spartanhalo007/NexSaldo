@@ -495,6 +495,8 @@ class VistaCuentasConDivisa(VistaCuentas):
         threading.Thread(target=_tarea, daemon=True).start()
 
     def _forzar_recalculo_visual(self) -> None:
+        if not self.winfo_exists():
+            return
         self._firma_cuentas_render = None
         self._firma_transferencias_render = None
         self.refrescar()

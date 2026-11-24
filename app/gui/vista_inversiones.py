@@ -1691,10 +1691,10 @@ class VistaInversiones(ctk.CTkFrame):
         rango_v = (v_max - v_min) if v_max > v_min else max(1.0, v_max * 0.05)
 
         if en_ganancia:
-            color_linea = "#7DC98F"
+            color_linea = COLORES["exito"]
             bandas_relleno = ("#255440", "#1E4434", "#18372A")
         else:
-            color_linea = "#F28C8C"
+            color_linea = COLORES["error"]
             bandas_relleno = ("#522931", "#3E2128", "#2E1B21")
 
         for frac in (0.0, 0.5, 1.0):
@@ -1787,7 +1787,7 @@ class VistaInversiones(ctk.CTkFrame):
             self._coords_montana_px, key=lambda item: abs(item[0] - x_raton)
         )
         px, py, etiqueta, valor = mas_cercano
-        color_c = "#7DC98F" if self._en_ganancia_montana else "#F28C8C"
+        color_c = COLORES["exito" if self._en_ganancia_montana else "error"]
 
         self._lienzo_montana.delete("crosshair_hover")
         self._lienzo_montana.create_line(
@@ -2292,4 +2292,3 @@ try:
     activar_boton_vender_en_vista_inversiones(VistaInversiones)
 except Exception:
     pass
-

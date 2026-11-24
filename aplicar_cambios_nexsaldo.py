@@ -1778,6 +1778,12 @@ def instalar_modulo_reportes(silencioso: bool = False) -> bool:
 
 
 def aplicar_todos_los_parches(silencioso: bool = False) -> None:
+    # Este instalador histórico (también invocado por pytest) sobrescribe módulos completos.
+    # No debe ejecutarse sobre una versión que ya integra el selector de temas.
+    if (RAIZ_PROYECTO / "app/gui/vista_temas.py").is_file():
+        if not silencioso:
+            print("Esta versión ya incorpora Reportes y Themes; no se aplicaron parches históricos.")
+        return
     instalar_modulo_reportes(silencioso=silencioso)
     parchar_gestor_financiero(silencioso=silencioso)
     parchar_vista_inversiones(silencioso=silencioso)
