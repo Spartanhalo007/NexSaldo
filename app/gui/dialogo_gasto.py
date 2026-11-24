@@ -54,12 +54,14 @@ class DialogoGasto(ctk.CTkToplevel):
         master,
         gestor: GestorFinanciero,
         al_guardar: Callable[[MovimientoFinanciero], None],
+        al_modificar_categorias: Optional[Callable[[], None]] = None,
         **kwargs,
     ):
         super().__init__(master, **kwargs)
         self._gestor = gestor
         self._al_guardar = al_guardar
 
+        self._al_modificar_categorias = al_modificar_categorias
         self._moneda_elegida = "COP"
         self._cotizacion_trm: Optional[Cotizacion] = None
         self._sincronizando_conversion = False
@@ -828,6 +830,8 @@ class DialogoGasto(ctk.CTkToplevel):
             lbl_cat.pack(pady=(3, 0))
             self._widgets_categorias[cat.nombre] = (btn, lbl_cat)
 
+            self._vincular_menu_contextual_categoria(btn, cat)
+            self._vincular_menu_contextual_categoria(lbl_cat, cat)
         idx_mas = len(categorias)
         fila_mas = idx_mas // columnas
         col_mas = idx_mas % columnas
@@ -1087,3 +1091,99 @@ class DialogoGasto(ctk.CTkToplevel):
         self.destroy()
         if callback is not None:
             callback(movimiento)
+
+    def _vincular_menu_contextual_categoria(self, widget, categoria) -> None:
+        """Enlaza clic derecho en el chip de categoría para mostrar Editar y Eliminar."""
+        from app.gui.selector_categorias import _enlazar_clic_derecho
+
+        _enlazar_clic_derecho(widget, lambda e, c=categoria: self._abrir_menu_categoria(e, c))
+
+    def _abrir_menu_categoria(self, evento, categoria) -> None:
+        """Despliega el menú contextual con opciones Editar y Eliminar sobre una categoría."""
+        import tkinter as tk
+        from app.gui.estilos import COLORES, FUENTE
+
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg=COLORES["fondo_lateral"],
+            fg=COLORES["texto"],
+            activebackground=COLORES["hover_lateral"],
+            activeforeground=COLORES["acento"],
+            bd=1,
+            relief="flat",
+            font=(FUENTE, 10),
+        )
+        menu.add_command(
+            label=f"✎  Editar «{categoria.nombre}»",
+            command=lambda c=categoria: self._abrir_editar_categoria(c),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=f"✕  Eliminar «{categoria.nombre}»",
+            foreground=COLORES["error"],
+            activeforeground=COLORES["error"],
+            command=lambda c=categoria: self._solicitar_eliminar_categoria(c),
+        )
+        try:
+            menu.tk_popup(evento.x_root, evento.y_root)
+        finally:
+            menu.grab_release()
+
+    def _abrir_editar_categoria(self, categoria) -> None:
+        """Abre DialogoCategoria en modo edición para la categoría seleccionada."""
+        nombre_anterior = categoria.nombre
+
+        def _al_editar(actualizada) -> None:
+            if self._categoria_elegida == nombre_anterior:
+                self._categoria_elegida = actualizada.nombre
+            self._renderizar_categorias()
+            cb = getattr(self, "_al_modificar_categorias", None)
+            if callable(cb):
+                cb()
+
+        DialogoCategoria(
+            self,
+            gestor=self._gestor,
+            al_crear=_al_editar,
+            tipo_inicial=categoria.tipo,
+            categoria_editar=categoria,
+        )
+
+    def _solicitar_eliminar_categoria(self, categoria) -> None:
+        """Abre confirmación segura (con reasignación si hay movimientos) y elimina la categoría."""
+        from app.gui.selector_categorias import DialogoEliminarCategoria
+
+        if categoria.id is None:
+            return
+        categorias = self._gestor.obtener_categorias_detalladas(categoria.tipo)
+        alternativas = [c for c in categorias if c.id is not None and c.id != categoria.id]
+        if not alternativas:
+            if hasattr(self, "_mostrar_error"):
+                self._mostrar_error(f"Debe existir al menos una categoría de {categoria.tipo.lower()}.")
+            return
+
+        cantidad = self._gestor.contar_movimientos_categoria(categoria.id)
+
+        def _confirmar(destino_id) -> None:
+            try:
+                self._gestor.eliminar_categoria(categoria.id, categoria_destino_id=destino_id)
+            except Exception as exc:
+                if hasattr(self, "_mostrar_error"):
+                    self._mostrar_error(str(exc))
+                return
+            if self._categoria_elegida == categoria.nombre:
+                destino = next((c for c in alternativas if c.id == destino_id), alternativas[0])
+                self._categoria_elegida = destino.nombre
+            self._renderizar_categorias()
+            cb = getattr(self, "_al_modificar_categorias", None)
+            if callable(cb):
+                cb()
+
+        DialogoEliminarCategoria(
+            self,
+            categoria=categoria,
+            cantidad_movimientos=cantidad,
+            alternativas=alternativas,
+            al_confirmar=_confirmar,
+        )

@@ -1092,6 +1092,108 @@ class GestorFinanciero:
                 pass
         return guardada
 
+
+    def editar_categoria(
+        self,
+        categoria_id: int,
+        nombre: str,
+        tipo: str = "GASTO",
+        simbolo: str = "mercado",
+        color: str = "#FBB718",
+        gasto_programado: bool = False,
+        frecuencia: Optional[str] = None,
+    ) -> Categoria:
+        """Actualiza una categoría existente por ID e invalida las cachés de categorías."""
+        if not isinstance(nombre, str) or not nombre.strip():
+            raise ValueError("El nombre de la categoría no puede estar vacío.")
+        nombre_limpio = nombre.strip()
+        if len(nombre_limpio) > 50:
+            raise ValueError("El nombre de la categoría no puede superar 50 caracteres.")
+
+        tipo_limpio = self._validar_tipo(tipo)
+        simbolo_limpio = simbolo.strip()
+        if simbolo_limpio not in TODOS_LOS_SIMBOLOS_CATEGORIA:
+            raise ValueError(f"Símbolo de categoría no válido: {simbolo_limpio}")
+        color_limpio = self._validar_color(color)
+
+        frecuencia_limpia: Optional[str] = None
+        if gasto_programado:
+            frec = (frecuencia or "MENSUAL").strip().upper()
+            if frec not in FRECUENCIAS_VALIDAS:
+                raise ValueError(f"Frecuencia no válida: {frec}")
+            frecuencia_limpia = frec
+
+        actualizada = Categoria(
+            id=categoria_id,
+            nombre=nombre_limpio,
+            tipo=tipo_limpio,
+            simbolo=simbolo_limpio,
+            color=color_limpio,
+            es_predeterminada=False,
+            gasto_programado=bool(gasto_programado),
+            frecuencia=frecuencia_limpia,
+        )
+
+        if hasattr(self._repositorio, "actualizar_categoria"):
+            resultado = self._repositorio.actualizar_categoria(actualizada)
+        else:
+            clave_anterior = next(
+                (k for k, v in self._categorias_memoria_extra.items() if v.id == categoria_id),
+                None,
+            )
+            if clave_anterior is not None:
+                self._categorias_memoria_extra.pop(clave_anterior, None)
+            self._categorias_memoria_extra[nombre_limpio] = actualizada
+            resultado = actualizada
+
+        self._cache_categorias_detalladas.clear()
+        self._cache_nombres_categorias = None
+        try:
+            if hasattr(self._repositorio, "registrar_color_reciente"):
+                self._repositorio.registrar_color_reciente(color_limpio)
+        except Exception:
+            pass
+        return resultado
+
+    def contar_movimientos_categoria(self, categoria_id: int) -> int:
+        """Retorna el número de movimientos vinculados a una categoría."""
+        if hasattr(self._repositorio, "contar_movimientos_por_categoria"):
+            return self._repositorio.contar_movimientos_por_categoria(categoria_id)
+        return 0
+
+    def eliminar_categoria(
+        self,
+        categoria_id: int,
+        categoria_destino_id: Optional[int] = None,
+    ) -> int:
+        """Elimina una categoría (reasignando movimientos si corresponde) e invalida cachés."""
+        todas = self.obtener_categorias_detalladas(tipo=None)
+        objetivo = next((c for c in todas if c.id == categoria_id), None)
+        if objetivo is not None:
+            mismo_tipo = [c for c in todas if c.tipo == objetivo.tipo]
+            if len(mismo_tipo) <= 1:
+                raise ValueError(
+                    f"No se puede eliminar la última categoría de {objetivo.tipo.lower()}."
+                )
+
+        if hasattr(self._repositorio, "eliminar_categoria"):
+            reasignados = self._repositorio.eliminar_categoria(
+                categoria_id,
+                categoria_destino_id=categoria_destino_id,
+            )
+        else:
+            clave = next(
+                (k for k, v in self._categorias_memoria_extra.items() if v.id == categoria_id),
+                None,
+            )
+            if clave is not None:
+                self._categorias_memoria_extra.pop(clave, None)
+            reasignados = 0
+
+        self._cache_categorias_detalladas.clear()
+        self._cache_nombres_categorias = None
+        return reasignados
+
     # ------------------------------------------------------------------
     # Etiquetas 100% customizables
     # ------------------------------------------------------------------

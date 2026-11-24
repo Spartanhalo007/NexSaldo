@@ -26,13 +26,11 @@ NAVEGACION = [
     ("Ingresos", "ingresos"),
     ("Inversiones", "inversiones"),
     ("Reportes", "reportes"),
-    ("Categorías", "pendiente"),
     ("Configuración", "pendiente"),
     ("Modo Oscuro", "tema"),
 ]
 
 MODULOS_PENDIENTES = {
-    "Categorías": "Gestión de categorías personalizadas en desarrollo.",
     "Configuración": "Ajustes y exportación de datos en desarrollo.",
 }
 
