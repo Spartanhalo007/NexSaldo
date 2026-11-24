@@ -2,6 +2,7 @@
 
 import tkinter as tk
 from tkinter import ttk
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,11 +69,38 @@ def test_contraste_de_los_temas_nuevos(tema):
         assert (alto + 0.05) / (bajo + 0.05) >= 4.5, (tema, texto, fondo)
 
 
+def _comprobar_categorias_inline(vista, modulo, gestor, paleta):
+    from app.gui.dialogo_categoria import DialogoCategoria
+    from app.gui.selector_categorias import DialogoEliminarCategoria
+
+    if modulo == "gastos":
+        vista._abrir_dialogo_anadir_gasto()
+        tipo = "GASTO"
+    else:
+        vista._abrir_dialogo_anadir_ingreso()
+        tipo = "INGRESO"
+    dialogo = next(w for w in vista.winfo_children() if isinstance(w, tk.Toplevel))
+    try:
+        categoria = gestor.obtener_categorias_detalladas(tipo)[0]
+        assert categoria.nombre in dialogo._widgets_categorias
+        dialogo._abrir_menu_categoria(SimpleNamespace(x_root=0, y_root=0), categoria)
+        menu = next(w for w in dialogo.winfo_children() if isinstance(w, tk.Menu))
+        assert str(menu.cget("activeforeground")) == paleta["acento"]
+        for indice, clase in ((0, DialogoCategoria), (2, DialogoEliminarCategoria)):
+            menu.invoke(indice)
+            modal = next(w for w in dialogo.winfo_children() if isinstance(w, clase))
+            assert modal.cget("fg_color") == paleta["fondo_lateral"]
+            modal.destroy()
+    finally:
+        dialogo.destroy()
+
+
 def test_selector_aplica_todos_los_temas_y_reabre_con_el_ultimo(monkeypatch):
     from app.gestor.gestor_financiero import GestorFinanciero
     from app.gui import ventana_principal
     from app.gui.selector_moneda import BarraFiltroMoneda
     from app.gui.vista_inversiones import VistaInversiones
+    from app.modelo.categoria import Categoria
     from pruebas.test_gestor_financiero import RepositorioDeMemoria
 
     # Prueba la interfaz y sus widgets, sin depender de la red ni de PostgreSQL.
@@ -80,6 +108,13 @@ def test_selector_aplica_todos_los_temas_y_reabre_con_el_ultimo(monkeypatch):
     monkeypatch.setattr(VistaInversiones, "_cargar_curva_montana_asincrona", lambda *a, **k: None)
     gestor = GestorFinanciero(RepositorioDeMemoria([]))
     monkeypatch.setattr(gestor, "obtener_tasa_cambio", lambda *a, **k: None)
+    categorias = [
+        Categoria(1, "Alimentación"), Categoria(2, "Otros gastos"),
+        Categoria(3, "Salario", "INGRESO"), Categoria(4, "Otros ingresos", "INGRESO"),
+    ]
+    monkeypatch.setattr(gestor, "obtener_categorias_detalladas",
+                        lambda tipo=None: [c for c in categorias if tipo is None or c.tipo == tipo])
+    monkeypatch.setattr(tk.Menu, "tk_popup", lambda *a: None)
     try:
         ventana = ventana_principal.VentanaPrincipal(gestor)
     except tk.TclError as error:
@@ -89,6 +124,7 @@ def test_selector_aplica_todos_los_temas_y_reabre_con_el_ultimo(monkeypatch):
     try:
         ventana.update_idletasks()
         assert ventana._tema == "carbon"
+        assert "Categorías" not in ventana._botones
         enlace = ventana.bind_all("<F7>", lambda _evento: None)
         errores = []
         ventana.report_callback_exception = lambda *error: errores.append(error)
@@ -117,6 +153,8 @@ def test_selector_aplica_todos_los_temas_y_reabre_con_el_ultimo(monkeypatch):
                 ventana.update_idletasks()
                 assert ventana._clave_vista_actual == modulo
                 assert ventana._botones[nombre].cget("fg_color") == paleta["acento"]
+                if tema in {"clasico", "fiordo"} and modulo in {"gastos", "ingresos"}:
+                    _comprobar_categorias_inline(ventana._vista_actual, modulo, gestor, paleta)
     finally:
         ventana.destroy()
 

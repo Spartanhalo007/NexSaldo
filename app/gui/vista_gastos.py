@@ -590,6 +590,7 @@ class VistaGastos(ctk.CTkFrame):
             self,
             gestor=self._gestor,
             al_guardar=self._al_guardar_nuevo_gasto,
+            al_modificar_categorias=self._refrescar_vista,
         )
 
     def _al_guardar_nuevo_gasto(self, movimiento):

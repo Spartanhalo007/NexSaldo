@@ -33,18 +33,20 @@ class DialogoCategoria(ctk.CTkToplevel):
         gestor: GestorFinanciero,
         al_crear: Callable[[Categoria], None],
         tipo_inicial: str = "GASTO",
+        categoria_editar: Optional[Categoria] = None,
         **kwargs,
     ):
         super().__init__(master, **kwargs)
         self._gestor = gestor
         self._al_crear = al_crear
+        self._categoria_editar = categoria_editar
         self._tipo = tipo_inicial.upper() if tipo_inicial else "GASTO"
-        self._simbolo_elegido = "factura"
-        self._color_elegido = COLORES_PREDETERMINADOS[0]
+        self._simbolo_elegido = self._categoria_editar.simbolo if self._categoria_editar else "factura"
+        self._color_elegido = self._categoria_editar.color if self._categoria_editar else COLORES_PREDETERMINADOS[0]
         self._botones_simbolos: Dict[str, ctk.CTkButton] = {}
         self._grupo_actual = list(CATALOGO_SIMBOLOS_CATEGORIAS.keys())[0]
 
-        self.title("Crear categoría")
+        self.title("Editar categoría" if self._categoria_editar else "Crear categoría")
         self.geometry("620x740")
         self.resizable(False, False)
         self.configure(fg_color=COLORES["fondo_lateral"])
@@ -53,6 +55,8 @@ class DialogoCategoria(ctk.CTkToplevel):
 
         self._construir_interfaz()
 
+        if self._categoria_editar is not None:
+            self._precargar_edicion()
     def _construir_interfaz(self):
         contenedor = ctk.CTkScrollableFrame(
             self, fg_color="transparent", width=580, height=690
@@ -457,17 +461,48 @@ class DialogoCategoria(ctk.CTkToplevel):
             frecuencia_clave = inverso.get(self._var_frecuencia.get(), "MENSUAL")
 
         try:
-            nueva = self._gestor.crear_categoria(
-                nombre=nombre,
-                tipo=tipo,
-                simbolo=self._simbolo_elegido,
-                color=self._color_elegido,
-                gasto_programado=programado,
-                frecuencia=frecuencia_clave,
-            )
+            if self._categoria_editar is not None and self._categoria_editar.id is not None:
+                nueva = self._gestor.editar_categoria(
+                    categoria_id=self._categoria_editar.id,
+                    nombre=nombre,
+                    tipo=tipo,
+                    simbolo=self._simbolo_elegido,
+                    color=self._color_elegido,
+                    gasto_programado=programado,
+                    frecuencia=frecuencia_clave,
+                )
+            else:
+                nueva = self._gestor.crear_categoria(
+                    nombre=nombre,
+                    tipo=tipo,
+                    simbolo=self._simbolo_elegido,
+                    color=self._color_elegido,
+                    gasto_programado=programado,
+                    frecuencia=frecuencia_clave,
+                )
         except ErrorValidacion as error:
             messagebox.showwarning("Datos incompletos", str(error), parent=self)
             return
 
         self._al_crear(nueva)
         self.destroy()
+
+    def _precargar_edicion(self) -> None:
+        """Precarga los campos del modal cuando se edita una categoría existente."""
+        cat = self._categoria_editar
+        if cat is None:
+            return
+        if hasattr(self, "_campo_nombre"):
+            self._campo_nombre.delete(0, "end")
+            self._campo_nombre.insert(0, cat.nombre)
+        if hasattr(self, "_var_tipo"):
+            self._var_tipo.set(cat.tipo)
+        if hasattr(self, "_var_programado"):
+            self._var_programado.set(bool(cat.gasto_programado))
+        if hasattr(self, "_combo_frecuencia") and cat.frecuencia:
+            etiqueta = ETIQUETAS_FRECUENCIA.get(cat.frecuencia, "Mensual")
+            self._combo_frecuencia.set(etiqueta)
+        if hasattr(self, "_actualizar_visibilidad_frecuencia"):
+            self._actualizar_visibilidad_frecuencia()
+        if hasattr(self, "_actualizar_preview"):
+            self._actualizar_preview()

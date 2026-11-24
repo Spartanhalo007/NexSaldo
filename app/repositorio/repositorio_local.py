@@ -146,6 +146,88 @@ class RepositorioLocal:
             conexion.commit()
             return categoria.con_id(nuevo_id)
 
+
+    def actualizar_categoria(self, categoria: Categoria) -> Categoria:
+        """Actualiza nombre, tipo, símbolo, color y programación de una categoría existente por ID."""
+        if categoria.id is None:
+            raise ValueError("Se requiere el ID de la categoría para actualizarla.")
+        with self._lock_bd:
+            conexion = self.conectar()
+            with conexion.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id FROM categoria WHERE LOWER(nombre) = LOWER(%s) AND id <> %s",
+                    (categoria.nombre, categoria.id),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError(f"Ya existe otra categoría llamada '{categoria.nombre}'.")
+                cursor.execute(
+                    """
+                    UPDATE categoria
+                    SET nombre = %s,
+                        tipo = %s,
+                        simbolo = %s,
+                        color = %s,
+                        gasto_programado = %s,
+                        frecuencia = %s
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        categoria.nombre,
+                        categoria.tipo,
+                        categoria.simbolo,
+                        categoria.color,
+                        categoria.gasto_programado,
+                        categoria.frecuencia,
+                        categoria.id,
+                    ),
+                )
+                fila = cursor.fetchone()
+                if fila is None:
+                    raise LookupError(f"No se encontró la categoría con ID {categoria.id}.")
+            conexion.commit()
+        return categoria
+
+    def contar_movimientos_por_categoria(self, categoria_id: int) -> int:
+        """Retorna cuántos movimientos financieros están asociados a la categoría indicada."""
+        with self._lock_bd:
+            conexion = self.conectar()
+            with conexion.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM movimiento_financiero WHERE categoria_id = %s",
+                    (categoria_id,),
+                )
+                fila = cursor.fetchone()
+                return int(fila[0]) if fila else 0
+
+    def eliminar_categoria(
+        self,
+        categoria_id: int,
+        categoria_destino_id: Optional[int] = None,
+    ) -> int:
+        """Elimina una categoría de forma segura, reasignando sus movimientos en la misma transacción si existen."""
+        with self._lock_bd:
+            conexion = self.conectar()
+            with conexion.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM movimiento_financiero WHERE categoria_id = %s",
+                    (categoria_id,),
+                )
+                vinculados = int(cursor.fetchone()[0])
+                if vinculados > 0:
+                    if categoria_destino_id is None or categoria_destino_id == categoria_id:
+                        raise ValueError(
+                            "La categoría tiene movimientos asociados; indica una categoría destino válida para reasignarlos."
+                        )
+                    cursor.execute(
+                        "UPDATE movimiento_financiero SET categoria_id = %s WHERE categoria_id = %s",
+                        (categoria_destino_id, categoria_id),
+                    )
+                cursor.execute("DELETE FROM categoria WHERE id = %s RETURNING id", (categoria_id,))
+                if cursor.fetchone() is None:
+                    raise LookupError(f"No se encontró la categoría con ID {categoria_id}.")
+            conexion.commit()
+        return vinculados
     # ------------------------------------------------------------------
     # Etiquetas 100% customizables
     # ------------------------------------------------------------------
